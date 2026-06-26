@@ -1,0 +1,100 @@
+[project]
+name = "rk3588-mobile-sr"
+version = "0.1.0"
+description = "RK3588 MobileOne 3x SISR (360x640 -> 1080x1920) with optional CPU/CUDA PyTorch"
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "MIT" }
+dependencies = [
+    "onnx>=1.17",
+    "pillow>=10.0",
+    "pytest>=8.0",
+    "rich>=13.0",
+    "ruff>=0.6.0",
+    "scikit-image>=0.21",
+    "tensorboard>=2.14",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+]
+cuda = [
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+]
+
+# To install CUDA variant:
+#   uv sync --extra cuda --extra-index-url https://download.pytorch.org/whl/cu130
+# To install CPU variant (default):
+#   uv sync --extra cpu
+# RKNN conversion is typically done in a separate environment because
+# rknn-toolkit2 pins torch<=2.4.0, which conflicts with this project's
+# torch>=2.12.0 requirement. Install it manually there when needed.
+
+[project.scripts]
+rk3588-train-stage1 = "train_stage1:main"
+rk3588-train-stage2 = "train_stage2:main"
+rk3588-train-stage3-qat = "train_stage3_qat:main"
+rk3588-export-onnx = "export_onnx:main"
+rk3588-eval-psnr = "eval_psnr:evaluate"
+
+[tool.uv]
+# Default CPU wheel source for PyTorch ecosystem.
+# For CUDA, use: uv sync --extra cuda --extra-index-url https://download.pytorch.org/whl/cu126
+# The extra-index-url must be supplied on the command line because a single pyproject.toml
+# cannot simultaneously express mutually exclusive CPU and CUDA wheel sources.
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+
+[tool.uv.pip]
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "train_stage1",
+    "train_stage2",
+    "train_stage3_qat",
+    "export_onnx",
+    "eval_psnr",
+    "rknn_convert",
+]
+packages = ["data", "models", "losses", "configs", "utils"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-ra -q --tb=short"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [
+    "checkpoints",
+    "data/DIV2K_*",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501", # line-too-long: handled by formatter
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
