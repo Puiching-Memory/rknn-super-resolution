@@ -1,13 +1,11 @@
-"""Stage 3: Deploy-before-QAT with fused MobileOne blocks (DDP)."""
+"""Stage 3: Deploy-before-QAT with fused MobileOne blocks (DDP via torchrun)."""
 
 import argparse
 import copy
-import os
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
@@ -18,7 +16,6 @@ from utils.train_framework import (
     build_loaders,
     build_model,
     cleanup_ddp,
-    find_free_port,
     make_optimizer,
     setup_ddp,
     train_epochs_ddp,
@@ -43,12 +40,6 @@ def parse_args():
     parser.add_argument("--ema_decay", type=float, default=0.999)
     parser.add_argument("--bn_batches", type=int, default=64)
     parser.add_argument("--backend", type=str, default="qnnpack")
-    parser.add_argument(
-        "--world_size",
-        type=int,
-        default=None,
-        help="number of GPUs; default uses all visible CUDA devices",
-    )
     return parser.parse_args()
 
 
@@ -64,8 +55,10 @@ def update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
             ema_p.copy_(decay * ema_p + (1.0 - decay) * p)
 
 
-def run_worker(rank, world_size, args):
-    setup_ddp(rank, world_size)
+def main():
+    args = parse_args()
+    rank = setup_ddp()
+    world_size = dist.get_world_size()
     device = torch.device(f"cuda:{rank}")
 
     save_dir = Path(args.save_dir)
@@ -153,16 +146,6 @@ def run_worker(rank, world_size, args):
         writer.close()
 
     cleanup_ddp()
-
-
-def main():
-    args = parse_args()
-    world_size = args.world_size or torch.cuda.device_count()
-    if world_size < 1:
-        raise RuntimeError("No CUDA devices available")
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = str(find_free_port())
-    mp.spawn(run_worker, args=(world_size, args), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":

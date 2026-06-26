@@ -123,22 +123,59 @@ def find_free_port() -> int:
     return port
 
 
-def setup_ddp(rank: int, world_size: int) -> None:
-    """Initialize NCCL process group for DDP."""
+def setup_ddp(
+    rank: int | None = None,
+    world_size: int | None = None,
+    *,
+    device_id: torch.device | None = None,
+) -> int:
+    """Initialize the default NCCL process group.
+
+    When running under ``torchrun`` the environment variables ``RANK``,
+    ``WORLD_SIZE``, ``MASTER_ADDR`` and ``MASTER_PORT`` are already set, so we
+    simply call ``init_process_group`` using those values.  For single-process
+    entry points (e.g. plain ``python train_stage*.py`` without a launcher) the
+    function can be called with explicit ``rank``/``world_size`` arguments.
+
+    Returns the rank of the current process.
+    """
+    rank_env = int(os.environ["RANK"]) if "RANK" in os.environ else None
+    world_size_env = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else None
+
+    if rank is not None and rank_env is not None and rank != rank_env:
+        raise RuntimeError(
+            f"Explicit rank {rank} does not match torchrun-provided RANK={rank_env}"
+        )
+    if world_size is not None and world_size_env is not None and world_size != world_size_env:
+        raise RuntimeError(
+            f"Explicit world_size {world_size} does not match torchrun-provided "
+            f"WORLD_SIZE={world_size_env}"
+        )
+
+    rank = rank_env if rank_env is not None else rank
+    world_size = world_size_env if world_size_env is not None else world_size
+    if rank is None or world_size is None:
+        raise RuntimeError(
+            "rank and world_size must be provided either by torchrun env vars or "
+            "as arguments to setup_ddp()"
+        )
+
     os.environ.setdefault("MASTER_ADDR", "localhost")
     if "MASTER_PORT" not in os.environ:
-        # MASTER_PORT must be set once by the launcher before spawning workers;
-        # picking a port independently per rank would break NCCL rendezvous.
         raise RuntimeError(
-            "MASTER_PORT is not set. Set it in the launcher process before spawning workers."
+            "MASTER_PORT is not set. When using torchrun it is provided by the launcher."
         )
-    torch.cuda.set_device(rank)
+
+    if device_id is None:
+        device_id = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
+    torch.cuda.set_device(device_id)
     dist.init_process_group(
         "nccl",
         rank=rank,
         world_size=world_size,
-        device_id=torch.device(f"cuda:{rank}"),
+        device_id=device_id,
     )
+    return rank
 
 
 def cleanup_ddp() -> None:

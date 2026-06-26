@@ -1,12 +1,10 @@
-"""Stage 1: FP32 baseline training with L1 loss (DDP)."""
+"""Stage 1: FP32 baseline training with L1 loss (DDP via torchrun)."""
 
 import argparse
-import os
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
 from rich.progress import (
@@ -19,6 +17,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
 from utils.train_framework import (
@@ -26,7 +25,6 @@ from utils.train_framework import (
     build_loaders,
     build_model,
     cleanup_ddp,
-    find_free_port,
     save_checkpoint_dict,
     setup_ddp,
 )
@@ -45,12 +43,6 @@ def parse_args():
     )
     parser.add_argument(
         "--log_every", type=int, default=100, help="log training loss every N steps"
-    )
-    parser.add_argument(
-        "--world_size",
-        type=int,
-        default=None,
-        help="number of GPUs; default uses all visible CUDA devices",
     )
     return parser.parse_args()
 
@@ -107,7 +99,6 @@ def train_steps(
     writer,
     save_dir,
     args,
-    sampler=None,
 ):
     model.train()
 
@@ -132,8 +123,8 @@ def train_steps(
     epoch = global_step // len(dataloader) + 1
     try:
         while global_step < max_steps:
-            if sampler is not None:
-                sampler.set_epoch(epoch)
+            if isinstance(dataloader.sampler, DistributedSampler):
+                dataloader.sampler.set_epoch(epoch)
             epoch += 1
             for lr, hr in dataloader:
                 lr, hr = lr.cuda(rank, non_blocking=True), hr.cuda(rank, non_blocking=True)
@@ -202,8 +193,10 @@ def train_steps(
     return global_step
 
 
-def run_worker(rank, world_size, args):
-    setup_ddp(rank, world_size)
+def main():
+    args = parse_args()
+    rank = setup_ddp()
+    world_size = dist.get_world_size()
 
     save_dir = Path(args.save_dir)
     if rank == 0:
@@ -218,7 +211,7 @@ def run_worker(rank, world_size, args):
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = DDP(model, device_ids=[rank])
 
-    train_loader, train_sampler, val_loader = build_loaders(
+    train_loader, _, val_loader = build_loaders(
         args,
         device,
         train_aug=True,
@@ -253,7 +246,6 @@ def run_worker(rank, world_size, args):
         writer,
         save_dir,
         args,
-        sampler=train_sampler,
     )
 
     if rank == 0:
@@ -261,16 +253,6 @@ def run_worker(rank, world_size, args):
         writer.close()
 
     cleanup_ddp()
-
-
-def main():
-    args = parse_args()
-    world_size = args.world_size or torch.cuda.device_count()
-    if world_size < 1:
-        raise RuntimeError("No CUDA devices available")
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = str(find_free_port())
-    mp.spawn(run_worker, args=(world_size, args), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":

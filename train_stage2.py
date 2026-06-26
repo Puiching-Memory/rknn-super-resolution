@@ -1,12 +1,10 @@
-"""Stage 2: Fidelity finetuning + teacher distillation (DDP)."""
+"""Stage 2: Fidelity finetuning + teacher distillation (DDP via torchrun)."""
 
 import argparse
-import os
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
@@ -18,7 +16,6 @@ from utils.train_framework import (
     build_loaders,
     build_model,
     cleanup_ddp,
-    find_free_port,
     make_optimizer,
     setup_ddp,
     train_epochs_ddp,
@@ -34,17 +31,13 @@ def parse_args():
     parser.add_argument("--stage1_weight", type=str, required=True)
     parser.add_argument("--lambda_dct", type=float, default=0.02)
     parser.add_argument("--lambda_kd", type=float, default=0.03)
-    parser.add_argument(
-        "--world_size",
-        type=int,
-        default=None,
-        help="number of GPUs; default uses all visible CUDA devices",
-    )
     return parser.parse_args()
 
 
-def run_worker(rank, world_size, args):
-    setup_ddp(rank, world_size)
+def main():
+    args = parse_args()
+    rank = setup_ddp()
+    world_size = dist.get_world_size()
     device = torch.device(f"cuda:{rank}")
 
     save_dir = Path(args.save_dir)
@@ -101,16 +94,6 @@ def run_worker(rank, world_size, args):
     if rank == 0:
         writer.close()
     cleanup_ddp()
-
-
-def main():
-    args = parse_args()
-    world_size = args.world_size or torch.cuda.device_count()
-    if world_size < 1:
-        raise RuntimeError("No CUDA devices available")
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = str(find_free_port())
-    mp.spawn(run_worker, args=(world_size, args), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":
