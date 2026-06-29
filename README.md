@@ -11,6 +11,8 @@
   3. Stage 3：量化感知训练（QAT），产出 INT8 友好权重
 - **端到端部署**：支持 PyTorch → ONNX → RKNN 转换链路。
 - **RK3588 适配**：输入固定为 360×640，输出 1080×1920，便于接入视频后处理链路。
+- **SwanLab 实验追踪**：使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录 loss、PSNR 等训练指标，支持云端与本地可视化。
+- **TraceML 性能诊断**：使用 [TraceML](https://github.com/traceopt-ai/traceml) 跟踪每步 input/compute 耗时、DDP rank 偏斜与显存趋势，训练结束输出 `final_summary.json`。
 
 ## 模型架构
 
@@ -61,17 +63,13 @@ rk3588_mobile_sr/
 
 ## 环境安装
 
-本项目使用 `uv` 管理依赖，Python 版本要求 `3.12.*`（见 `pyproject.toml`）。
+本项目使用 `uv` 管理依赖，Python 版本要求 `3.12.*`，训练环境固定为 **CUDA 13.0（cu130）**，需要 NVIDIA GPU。
 
 ```bash
-# CPU 版本（默认）
-uv sync --extra cpu
-
-# CUDA 版本
-uv sync --extra cuda --extra-index-url https://download.pytorch.org/whl/cu130
+uv sync
 ```
 
-> 注意：PyTorch 的 CPU/CUDA 源互斥，需在命令行显式指定 `--extra-index-url`。
+PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVIDIA PyPI）。
 > RKNN 转换建议在独立环境中安装 `rknn-toolkit2`，因为它对 torch/onnx 的版本限制与本项目训练依赖冲突。
 
 ## 数据准备
@@ -88,40 +86,85 @@ data/
 
 ## 训练流程
 
+训练脚本使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录实验指标。DDP 训练仅在 rank 0 上初始化 SwanLab，日志写入 `<save_dir>/swanlog/` 并同步至 SwanLab 云端（首次使用需按提示登录）。
+
+```bash
+# 禁用 SwanLab
+torchrun --nproc_per_node=1 train_stage1.py ... --no_swanlab
+
+# 指定实验名
+torchrun --nproc_per_node=1 train_stage1.py ... --swanlab_experiment my-run-001
+```
+
+### TraceML 训练性能诊断
+
+训练脚本已集成 [TraceML](https://github.com/traceopt-ai/traceml)。用 `traceml run` 启动（替代 `torchrun`/`python`），训练结束后会在 `logs/<run_name>/` 生成 `final_summary.json` 与可读文本报告，用于定位 DataLoader 瓶颈、DDP rank 偏斜、显存泄漏等问题。
+
+```bash
+# 单卡
+traceml run train_stage1.py \
+  --hr_dir data/DIV2K_train_HR \
+  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+  --val_hr_dir data/DIV2K_valid_HR \
+  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --save_dir ./checkpoints/stage1
+
+# 多卡 DDP（TraceML 内置 --nproc-per-node，等价于 torchrun）
+traceml run train_stage1.py --nproc-per-node=8 \
+  --hr_dir data/DIV2K_train_HR \
+  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+  --val_hr_dir data/DIV2K_valid_HR \
+  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --save_dir ./checkpoints/stage1
+
+# 实时终端面板
+traceml run train_stage1.py --mode=cli --nproc-per-node=8 ...
+
+# 对比两次运行（例如调 num_workers 前后）
+traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
+```
+
+- 通过 `traceml run` 启动时 TraceML **默认开启**；普通 `torchrun` 下可用 `--traceml` 手动开启 instrumentation，但完整 summary 仍需 `traceml run`。
+- 可用 `--no-traceml` 关闭；summary 指标会以 `traceml/...` 前缀同步到 SwanLab（若未禁用）。
+- Stage 2 / Stage 3 同样支持：`traceml run train_stage2.py ...`、`traceml run train_stage3_qat.py ...`。
+
 ### Stage 1：FP32 基线
 
 ```bash
-python train_stage1.py \
+torchrun --nproc_per_node=8 train_stage1.py \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
   --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
   --patch_size 128 \
   --batch_size 16 \
-  --epochs 600 \
   --lr 1e-3 \
   --save_dir ./checkpoints/stage1
 ```
+
+Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次，若连续 `--early_stop_patience`（10）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.01 dB）则停止；`--max_steps`（100000）为安全上限。可用 `--no_early_stop` 改为只跑到 `max_steps`。
 
 ### Stage 2：蒸馏 + 感知损失微调
 
 需先准备教师模型权重（如 EDSR），默认路径 `checkpoints/teacher/edsr_x3.pth`。
 
 ```bash
-python train_stage2.py \
+torchrun --nproc_per_node=1 train_stage2.py \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
   --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --teacher_arch edsr \
   --teacher_weight checkpoints/teacher/edsr_x3.pth \
+  --stage1_weight checkpoints/stage1/best.pth \
   --save_dir ./checkpoints/stage2
 ```
 
 ### Stage 3：QAT 量化感知训练
 
 ```bash
-python train_stage3_qat.py \
-  --weight checkpoints/stage2/best.pth \
+torchrun --nproc_per_node=1 train_stage3_qat.py \
+  --stage2_weight checkpoints/stage2/best.pth \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --save_dir ./checkpoints/stage3_qat

@@ -16,7 +16,10 @@ data:
 stage1:
   patch_size: 128
   batch_size: 16
-  epochs: 600
+  max_steps: 100000
+  early_stop_patience: 10
+  early_stop_min_delta: 0.01
+  val_every: 1000
   lr: 1.0e-3
   loss: "l1"
 

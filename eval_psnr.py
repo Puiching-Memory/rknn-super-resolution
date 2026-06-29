@@ -10,6 +10,7 @@ from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
 from models.mobileone_sr import MobileOneSR
+from utils.train_framework import require_cuda, setup_device
 
 
 def parse_args():
@@ -28,7 +29,8 @@ def parse_args():
 
 @torch.no_grad()
 def evaluate(args):
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    require_cuda()
+    device = setup_device(args)
     model = MobileOneSR(
         scale=args.scale,
         num_channels=args.num_channels,

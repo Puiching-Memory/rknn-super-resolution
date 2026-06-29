@@ -1,5 +1,7 @@
 """8x8 DCT loss for high-frequency fidelity."""
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,18 +26,18 @@ class DCTLoss(nn.Module):
                         basis[i, j, u, v] = (
                             au
                             * av
-                            * torch.cos((2 * i + 1) * u * 3.14159265 / (2 * n))
-                            * torch.cos((2 * j + 1) * v * 3.14159265 / (2 * n))
+                            * math.cos((2 * i + 1) * u * math.pi / (2 * n))
+                            * math.cos((2 * j + 1) * v * math.pi / (2 * n))
                         )
         return basis
 
     def _dct2(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w = x.shape
         n = self.block_size
-        x = F.unfold(x, kernel_size=n, stride=n)  # b, c*n*n, L
-        x = x.view(b, c, n, n, -1).permute(0, 1, 4, 2, 3).contiguous()
-        x = x.view(-1, n, n)
-        dct = torch.einsum("ijuv,xyuv->ijxy", x, self.basis.to(x.device))
+        x = F.unfold(x, kernel_size=n, stride=n)
+        num_blocks = x.shape[-1]
+        x = x.view(b * c * num_blocks, n, n)
+        dct = torch.einsum("bij,ijuv->buv", x, self.basis.to(x.device))
         return dct
 
     def forward(self, pred: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:

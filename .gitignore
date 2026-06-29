@@ -42,6 +42,7 @@ env/
 # Training / experiment outputs
 runs/
 logs/
+swanlog/
 checkpoints/
 outputs/
 experiments/

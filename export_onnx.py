@@ -6,6 +6,7 @@ import torch
 
 from models.mobileone_sr import MobileOneSR
 from models.qat_utils import prepare_model_for_qat
+from utils.train_framework import require_cuda
 
 
 def parse_args():
@@ -25,7 +26,8 @@ def parse_args():
 
 def main():
     args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    require_cuda()
+    device = torch.device("cuda")
 
     model = MobileOneSR(
         scale=args.scale,

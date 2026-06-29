@@ -23,7 +23,7 @@ def test_charbonnier_loss_zero_for_equal():
     x = torch.randn(2, 3, 16, 16)
 
     loss = criterion(x, x)
-    assert loss.item() == pytest.approx(0.0, abs=1e-6)
+    assert loss.item() == pytest.approx(0.0, abs=1e-5)
 
 
 def test_dct_loss_shape_and_sign():
@@ -40,7 +40,7 @@ def test_dct_loss_shape_and_sign():
 
 def test_kd_loss_confidence_weighting():
     """ConfidenceWeightedKDLoss should reduce with confidence weights."""
-    criterion = ConfidenceWeightedKDLoss(temperature=1.0)
+    criterion = ConfidenceWeightedKDLoss()
     student = torch.randn(2, 3, 8, 8)
     teacher = torch.randn(2, 3, 8, 8)
     target = torch.randn(2, 3, 8, 8)

@@ -8,9 +8,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.tensorboard import SummaryWriter
 
 from models.qat_utils import bn_recalibrate, convert_qat_model, prepare_model_for_qat
+from utils.swanlab_logging import finish_swanlab, setup_swanlab
+from utils.traceml_profiling import finish_traceml, setup_traceml
 from utils.train_framework import (
     add_common_args,
     build_loaders,
@@ -31,6 +32,8 @@ def parse_args():
         epochs=150,
         lr=1e-6,
         save_dir="./checkpoints/stage3",
+        amp=False,
+        compile=False,
     )
     parser.add_argument("--stage2_weight", type=str, required=True)
     parser.add_argument("--phase1", type=int, default=30)
@@ -87,7 +90,6 @@ def main():
 
     optimizer = make_optimizer(model, args.lr)
     criterion = nn.L1Loss()
-    writer = SummaryWriter(log_dir=str(save_dir / "logs")) if rank == 0 else None
 
     ema_model = copy.deepcopy(model)
     ema_model.requires_grad_(False)
@@ -118,32 +120,46 @@ def main():
     def save_best_extra(best_path: Path):
         torch.save(ema_model.state_dict(), best_path.with_stem(best_path.stem + "_ema"))
 
-    train_epochs_ddp(
-        model,
-        train_loader,
-        loss_fn,
-        optimizer,
-        device,
-        rank,
-        world_size,
-        epochs=args.epochs,
-        val_loader=val_loader,
-        writer=writer,
+    setup_swanlab(
+        rank=rank,
         save_dir=save_dir,
-        val_every=10,
-        save_every=50,
-        epoch_start=epoch_start,
-        post_step=post_step,
-        save_best_extra=save_best_extra,
+        project=args.swanlab_project,
+        experiment_name=args.swanlab_experiment or "stage3_qat",
+        config=vars(args),
+        disabled=args.no_swanlab,
     )
+    setup_traceml(args, rank=rank)
+    try:
+        train_epochs_ddp(
+            model,
+            train_loader,
+            loss_fn,
+            optimizer,
+            device,
+            rank,
+            world_size,
+            epochs=args.epochs,
+            val_loader=val_loader,
+            save_dir=save_dir,
+            val_every=10,
+            save_every=50,
+            epoch_start=epoch_start,
+            post_step=post_step,
+            save_best_extra=save_best_extra,
+            vis_samples=args.vis_samples,
+            log_images=not args.no_vis,
+            vis_max_size=args.vis_max_size,
+        )
 
-    if rank == 0:
-        torch.save(ema_model.state_dict(), save_dir / "last_ema.pth")
+        if rank == 0:
+            torch.save(ema_model.state_dict(), save_dir / "last_ema.pth")
 
-        # Save quantized model
-        quantized = convert_qat_model(train_model)
-        torch.jit.save(torch.jit.script(quantized), str(save_dir / "quantized.pt"))
-        writer.close()
+            # Save quantized model
+            quantized = convert_qat_model(train_model)
+            torch.jit.save(torch.jit.script(quantized), str(save_dir / "quantized.pt"))
+    finally:
+        finish_traceml(rank=rank)
+        finish_swanlab()
 
     cleanup_ddp()
 

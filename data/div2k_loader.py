@@ -9,6 +9,50 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
 
 
+def collect_paired_paths(
+    hr_dir: str,
+    lr_dir: str | None,
+    scale: int = 3,
+    subset: str | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return aligned LR/HR file path lists."""
+    hr_dir_path = Path(hr_dir)
+    if not hr_dir_path.exists():
+        raise FileNotFoundError(f"HR directory not found: {hr_dir}")
+
+    hr_paths = sorted(hr_dir_path.glob("*.png"))
+    if len(hr_paths) == 0:
+        hr_paths = sorted(hr_dir_path.glob("*.jpg"))
+    if subset is not None:
+        indices = [int(x) for x in subset.replace(",", " ").split()]
+        hr_paths = [hr_paths[i - 1] for i in indices if 0 < i <= len(hr_paths)]
+
+    if lr_dir is None:
+        raise ValueError("lr_dir is required for paired DIV2K loading")
+
+    lr_dir_path = Path(lr_dir)
+    lr_files = sorted(lr_dir_path.glob(f"*x{scale}.png"))
+    if len(lr_files) == 0:
+        lr_files = sorted(lr_dir_path.glob("*.png"))
+        if len(lr_files) == 0:
+            lr_files = sorted(lr_dir_path.glob("*.jpg"))
+    lr_map = {p.stem.split("x")[0]: p for p in lr_files}
+
+    lr_paths: list[str] = []
+    hr_matched: list[str] = []
+    for hr_path in hr_paths:
+        key = hr_path.stem
+        if key not in lr_map:
+            continue
+        lr_paths.append(str(lr_map[key]))
+        hr_matched.append(str(hr_path))
+
+    if len(lr_paths) == 0:
+        raise FileNotFoundError(f"No paired LR/HR images found under {hr_dir} and {lr_dir}")
+
+    return lr_paths, hr_matched
+
+
 class DIV2KDataset(Dataset):
     """DIV2K dataset returning paired LR/HR patches."""
 
@@ -27,40 +71,19 @@ class DIV2KDataset(Dataset):
         self.hr_patch_size = patch_size * scale
         self.augment = augment
 
-        hr_dir = Path(hr_dir)
-        if not hr_dir.exists():
-            raise FileNotFoundError(f"HR directory not found: {hr_dir}")
+        if lr_dir is None:
+            raise ValueError("lr_dir is required")
 
-        self.hr_paths = sorted(hr_dir.glob("*.png"))
-        if len(self.hr_paths) == 0:
-            self.hr_paths = sorted(hr_dir.glob("*.jpg"))
-        if subset is not None:
-            indices = [int(x) for x in subset.replace(",", " ").split()]
-            self.hr_paths = [self.hr_paths[i - 1] for i in indices if 0 < i <= len(self.hr_paths)]
-
-        self.lr_paths = None
-        if lr_dir is not None:
-            lr_dir = Path(lr_dir)
-            lr_files = sorted(lr_dir.glob(f"*x{scale}.png"))
-            if len(lr_files) == 0:
-                lr_files = sorted(lr_dir.glob("*.png"))
-                if len(lr_files) == 0:
-                    lr_files = sorted(lr_dir.glob("*.jpg"))
-            self.lr_paths = {p.stem.split("x")[0]: p for p in lr_files}
+        lr_paths, hr_paths = collect_paired_paths(hr_dir, lr_dir, scale=scale, subset=subset)
+        self.lr_paths = [Path(p) for p in lr_paths]
+        self.hr_paths = [Path(p) for p in hr_paths]
 
     def __len__(self) -> int:
         return len(self.hr_paths)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        hr_path = self.hr_paths[idx]
-        hr = Image.open(hr_path).convert("RGB")
-
-        if self.lr_paths is not None:
-            key = hr_path.stem
-            lr = Image.open(self.lr_paths[key]).convert("RGB")
-        else:
-            w, h = hr.size
-            lr = hr.resize((w // self.scale, h // self.scale), Image.BICUBIC)
+        hr = Image.open(self.hr_paths[idx]).convert("RGB")
+        lr = Image.open(self.lr_paths[idx]).convert("RGB")
 
         hr = TF.to_tensor(hr) * 255.0
         lr = TF.to_tensor(lr) * 255.0
@@ -127,7 +150,7 @@ def build_dataloader(
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=(augment and sampler is None),
+        shuffle=augment and sampler is None,
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=True,
