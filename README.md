@@ -36,27 +36,21 @@ Output(3×1080×1920)
 
 ```
 rk3588_mobile_sr/
-├── configs/
-│   └── mobileone_sr_x3.yaml       # 默认训练/部署配置
-├── data/
-│   └── div2k_loader.py            # DIV2K 数据集加载器
+├── src/rk3588_mobile_sr/          # 可安装包（src layout）
+│   ├── cli.py                     # 统一 CLI 入口
+│   ├── config/                    # YAML 配置加载
+│   ├── data/                      # DIV2K 数据加载（DALI / LMDB / PyTorch）
+│   ├── models/                    # MobileOneSR 模型与 QAT 工具
+│   ├── losses/                    # 训练损失函数
+│   ├── utils/                     # 训练框架、指标、日志
+│   ├── distributed/               # DDP 上下文、验证、同步原语
+│   ├── train/                     # StepTrainer、TrainSession、Stage 1/2/3
+│   ├── eval/                      # PSNR/SSIM 评测
+│   ├── export/                    # ONNX 导出
+│   └── deploy/                    # RKNN 转换模板
+├── scripts/                       # 开发与性能分析脚本
+├── tests/                         # 单元测试
 ├── docs/
-│   └── RK3588_MobileOne_SR_落地方案.md
-├── losses/
-│   ├── charbonnier.py
-│   ├── dct_loss.py
-│   └── kd_loss.py
-├── models/
-│   ├── mobileone_block.py         # MobileOne 重参数化块
-│   ├── mobileone_sr.py            # MobileOneSR 模型定义
-│   ├── qat_utils.py               # QAT 工具
-│   └── teacher_wrapper.py         # 教师模型蒸馏包装
-├── eval_psnr.py                   # PSNR/SSIM 评测
-├── export_onnx.py                 # 导出 ONNX
-├── rknn_convert.py                # ONNX → RKNN 模板脚本
-├── train_stage1.py                # 阶段 1 训练
-├── train_stage2.py                # 阶段 2 蒸馏微调
-├── train_stage3_qat.py            # 阶段 3 量化感知训练
 ├── pyproject.toml
 └── README.md
 ```
@@ -69,8 +63,35 @@ rk3588_mobile_sr/
 uv sync
 ```
 
+开发依赖（ruff、pytest、pre-commit）：
+
+```bash
+uv sync --extra dev
+```
+
 PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVIDIA PyPI）。
 > RKNN 转换建议在独立环境中安装 `rknn-toolkit2`，因为它对 torch/onnx 的版本限制与本项目训练依赖冲突。
+
+## CLI 用法
+
+安装后可通过统一 CLI 调用各子命令（参数与原先脚本一致）：
+
+```bash
+# 查看帮助
+uv run rk3588-mobile-sr --help
+
+# 训练（DDP 仍用 torchrun 包装）
+torchrun --nproc_per_node=8 rk3588-mobile-sr train stage1 \
+  --hr_dir data/DIV2K_train_HR \
+  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+  ...
+
+# 评测 / 导出
+uv run rk3588-mobile-sr eval --weight checkpoints/stage2/best.pth ...
+uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage2/best.pth ...
+```
+
+也保留了独立入口别名：`rk3588-train-stage1`、`rk3588-eval-psnr` 等。
 
 ## 数据准备
 
@@ -88,12 +109,35 @@ data/
 
 训练脚本使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录实验指标。DDP 训练仅在 rank 0 上初始化 SwanLab，日志写入 `<save_dir>/swanlog/` 并同步至 SwanLab 云端（首次使用需按提示登录）。
 
+训练过程文本日志由 [loguru](https://github.com/Delgan/loguru) 写入 `<save_dir>/train.log`（每次启动覆盖），rank 0 在交互式终端下会同步输出到 stderr。**无需** `tee` 或 `TRAIN_PLAIN_LOG`；直接 `torchrun` 启动即可。
+
+### DDP 同步模型（step-based）
+
+三阶段训练共用同一套 **step-based** 循环（`StepTrainer`），由 `DistributedContext` 封装所有 collective，避免 rank 0 在验证后做日志/SwanLab/checkpoint 时与其他 rank 的 `broadcast` 死锁。
+
+```text
+每个 training step:
+  所有 rank: forward + backward + optimizer.step
+  每 log_every: all_reduce_avg(loss) → rank0 写日志
+
+每 val_every step:
+  所有 rank: validate_ddp(_extended) + gather 指标
+  rank0_section:
+    rank0: deploy 检查 / SwanLab 图像 / best.pth
+    所有 rank: barrier
+  所有 rank: broadcast_bool(should_stop)  # 早停决策
+```
+
+核心原语 `rank0_section`：**任何 rank0 独占逻辑必须在 collective 完成之后、且由 barrier 收尾**，禁止在 `broadcast` 之前让非 0 rank 等待。
+
+Stage 1 / Stage 2 默认启用 **早停**（验证 PSNR 连续若干次无提升则停止）；Stage 3 不启用早停。各阶段 `--max_steps` 为安全上限。
+
 ```bash
 # 禁用 SwanLab
-torchrun --nproc_per_node=1 train_stage1.py ... --no_swanlab
+torchrun --nproc_per_node=1 rk3588-mobile-sr train stage1 ... --no_swanlab
 
 # 指定实验名
-torchrun --nproc_per_node=1 train_stage1.py ... --swanlab_experiment my-run-001
+torchrun --nproc_per_node=1 rk3588-mobile-sr train stage1 ... --swanlab_experiment my-run-001
 ```
 
 ### TraceML 训练性能诊断
@@ -102,7 +146,7 @@ torchrun --nproc_per_node=1 train_stage1.py ... --swanlab_experiment my-run-001
 
 ```bash
 # 单卡
-traceml run train_stage1.py \
+traceml run rk3588-mobile-sr train stage1 \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
@@ -110,7 +154,7 @@ traceml run train_stage1.py \
   --save_dir ./checkpoints/stage1
 
 # 多卡 DDP（TraceML 内置 --nproc-per-node，等价于 torchrun）
-traceml run train_stage1.py --nproc-per-node=8 \
+traceml run rk3588-mobile-sr train stage1 --nproc-per-node=8 \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
@@ -118,7 +162,7 @@ traceml run train_stage1.py --nproc-per-node=8 \
   --save_dir ./checkpoints/stage1
 
 # 实时终端面板
-traceml run train_stage1.py --mode=cli --nproc-per-node=8 ...
+traceml run rk3588-mobile-sr train stage1 --mode=cli --nproc-per-node=8 ...
 
 # 对比两次运行（例如调 num_workers 前后）
 traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
@@ -126,12 +170,12 @@ traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
 
 - 通过 `traceml run` 启动时 TraceML **默认开启**；普通 `torchrun` 下可用 `--traceml` 手动开启 instrumentation，但完整 summary 仍需 `traceml run`。
 - 可用 `--no-traceml` 关闭；summary 指标会以 `traceml/...` 前缀同步到 SwanLab（若未禁用）。
-- Stage 2 / Stage 3 同样支持：`traceml run train_stage2.py ...`、`traceml run train_stage3_qat.py ...`。
+- Stage 2 / Stage 3 同样支持：`traceml run rk3588-mobile-sr train stage2 ...`、`traceml run rk3588-mobile-sr train stage3-qat ...`。
 
 ### Stage 1：FP32 基线
 
 ```bash
-torchrun --nproc_per_node=8 train_stage1.py \
+torchrun --nproc_per_node=8 rk3588-mobile-sr train stage1 \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
@@ -146,10 +190,10 @@ Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次�
 
 ### Stage 2：蒸馏 + 感知损失微调
 
-需先准备教师模型权重（如 EDSR），默认路径 `checkpoints/teacher/edsr_x3.pth`。
+与 Stage 1 相同，采用 **step-based** 训练（LMDB 无限随机采样）：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证，每 `--log_every 500` step 打日志。默认启用 **早停**：连续 `--early_stop_patience`（8）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.005 dB）则停止；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（如 EDSR），默认路径 `checkpoints/teacher/edsr_x3.pth`。
 
 ```bash
-torchrun --nproc_per_node=1 train_stage2.py \
+torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
@@ -162,11 +206,22 @@ torchrun --nproc_per_node=1 train_stage2.py \
 
 ### Stage 3：QAT 量化感知训练
 
+同样为 **step-based**。QAT 分三阶段，由 step 控制切换（非 epoch）：
+
+| 阶段 | step 范围 | 行为 |
+|------|-----------|------|
+| Phase 1 | 1 – `phase1_steps` (3000) | 训练 + 更新 observer |
+| Phase 2 | `phase1_steps+1` – `phase2_steps` (9000) | 冻结 observer，继续 fake-quant 训练 |
+| Phase 3 | `phase2_steps+1` – `max_steps` (15000) | 冻结 fake-quant，权重微调 |
+
 ```bash
-torchrun --nproc_per_node=1 train_stage3_qat.py \
+torchrun --nproc_per_node=1 rk3588-mobile-sr train stage3-qat \
   --stage2_weight checkpoints/stage2/best.pth \
   --hr_dir data/DIV2K_train_HR \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+  --max_steps 15000 \
+  --phase1_steps 3000 \
+  --phase2_steps 9000 \
   --save_dir ./checkpoints/stage3_qat
 ```
 
@@ -176,14 +231,14 @@ torchrun --nproc_per_node=1 train_stage3_qat.py \
 
 ```bash
 # FP32 ONNX
-python export_onnx.py \
+uv run rk3588-mobile-sr export-onnx \
   --weight checkpoints/stage2/best.pth \
   --output mobileone_sr_x3.onnx \
   --input_h 360 \
   --input_w 640
 
 # QAT ONNX
-python export_onnx.py \
+uv run rk3588-mobile-sr export-onnx \
   --weight checkpoints/stage3_qat/best.pth \
   --output mobileone_sr_x3_qat.onnx \
   --qat \
@@ -195,7 +250,7 @@ python export_onnx.py \
 ### 评测 PSNR/SSIM
 
 ```bash
-python eval_psnr.py \
+uv run rk3588-mobile-sr eval \
   --weight checkpoints/stage2/best.pth \
   --hr_dir data/DIV2K_valid_HR \
   --lr_dir data/DIV2K_valid_LR_bicubic/X3 \
@@ -207,7 +262,7 @@ python eval_psnr.py \
 > `rknn_convert.py` 当前为模板脚本，需要在已安装 `rknn-toolkit2` 的环境中补全 RKNN API 调用。
 
 ```bash
-python rknn_convert.py \
+uv run rk3588-mobile-sr convert-rknn \
   --onnx mobileone_sr_x3.onnx \
   --output mobileone_sr_x3.rknn \
   --target rk3588 \
@@ -218,7 +273,14 @@ python rknn_convert.py \
 
 ## 配置说明
 
-`configs/mobileone_sr_x3.yaml` 中集中管理模型、数据、训练和部署参数，例如：
+`src/rk3588_mobile_sr/config/mobileone_sr_x3.yaml` 中集中管理模型、数据、训练和部署参数，可通过 Python API 加载：
+
+```python
+from rk3588_mobile_sr.config import load_config
+cfg = load_config()  # 或 load_config("path/to/custom.yaml")
+```
+
+示例配置：
 
 ```yaml
 model:

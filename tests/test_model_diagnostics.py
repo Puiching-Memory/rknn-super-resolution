@@ -2,8 +2,8 @@
 
 import torch
 
-from models.mobileone_sr import MobileOneSR
-from utils.model_diagnostics import (
+from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.utils.model_diagnostics import (
     ForwardDiagnosticsTracker,
     check_deploy_consistency,
     collect_grad_norms,
@@ -29,7 +29,6 @@ def test_forward_tracker_reports_skip_and_clip_stats():
 def test_grad_and_weight_norm_groups():
     model = MobileOneSR(num_blocks=2, num_channels=8)
     x = torch.rand(1, 3, 32, 32) * 255.0
-    y = torch.rand(1, 3, 96, 96) * 255.0
     out = model(x)
     out.mean().backward()
 

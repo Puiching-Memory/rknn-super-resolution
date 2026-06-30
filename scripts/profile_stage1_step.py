@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import time
 
 import torch
 import torch.nn as nn
 
-from data.div2k_dali import build_dali_train_loader
-from data.div2k_lmdb import build_lmdb_train_loader
-from data.prefetch import BatchPrefetcher
-from models.mobileone_sr import MobileOneSR
-from utils.train_framework import build_train_accel, maybe_compile, run_backward
+from rk3588_mobile_sr.data.div2k_dali import build_dali_train_loader
+from rk3588_mobile_sr.data.div2k_lmdb import build_lmdb_train_loader
+from rk3588_mobile_sr.data.prefetch import BatchPrefetcher
+from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.utils.train_framework import build_train_accel, maybe_compile, run_backward
 
 
 def main() -> None:

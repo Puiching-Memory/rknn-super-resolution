@@ -2,7 +2,7 @@
 
 import torch
 
-from losses import Stage2Loss
+from rk3588_mobile_sr.losses import Stage2Loss
 
 
 def test_stage2_loss_components_sum_to_total():

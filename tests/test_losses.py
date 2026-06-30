@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from losses import CharbonnierLoss, ConfidenceWeightedKDLoss, DCTLoss
+from rk3588_mobile_sr.losses import CharbonnierLoss, ConfidenceWeightedKDLoss, DCTLoss
 
 
 def test_charbonnier_loss_positive():

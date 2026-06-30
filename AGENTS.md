@@ -14,7 +14,20 @@ This project uses `uv` as the default Python package and environment manager. Do
 uv sync
 ```
 
+For development (lint, tests, pre-commit):
+
+```bash
+uv sync --extra dev
+```
+
 PyTorch and DALI wheel sources are pinned in `pyproject.toml` under `[tool.uv.index]` and `[tool.uv.sources]`.
+
+### Project Layout
+
+The installable package lives under `src/rk3588_mobile_sr/` (src layout). Entry points:
+
+- `rk3588-mobile-sr` — unified CLI (`train`, `eval`, `export-onnx`, `convert-rknn`)
+- Legacy aliases: `rk3588-train-stage1`, `rk3588-train-stage2`, etc.
 
 ### Notes
 

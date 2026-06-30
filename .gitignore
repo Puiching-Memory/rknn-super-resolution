@@ -27,10 +27,13 @@ share/python-wheels/
 MANIFEST
 
 # Virtual environments
-.venv
+.venv/
 venv/
 ENV/
 env/
+
+# uv
+.uv/
 
 # IDEs
 .vscode/
@@ -39,6 +42,17 @@ env/
 *.swo
 *~
 
+# Lint / test / type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pytype/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
 # Training / experiment outputs
 runs/
 logs/
@@ -46,6 +60,8 @@ swanlog/
 checkpoints/
 outputs/
 experiments/
+*_metrics.json
+final_summary.json
 
 # Model artifacts
 *.pt
@@ -57,15 +73,17 @@ experiments/
 *.tar
 *.tar.gz
 *.tgz
+*.safetensors
+*.ckpt
 
-# Datasets
-DIV2K/
-data/DIV2K/
-data/DIV2K_*/
-*.lmdb
+# Datasets (local DIV2K / LMDB; keep out of git)
+/data/
 
 # TensorBoard event files
 *.tfevents.*
+
+# Profiling
+*.prof
 
 # Logs / environment
 *.log
@@ -74,12 +92,6 @@ data/DIV2K_*/
 
 # Experiment tracking
 wandb/
-
-# Lightning checkpoints
-*.ckpt
-
-# HuggingFace / safetensors
-*.safetensors
 
 # OS files
 .DS_Store

@@ -2,7 +2,7 @@
 
 import torch
 
-from utils.sr_metrics import (
+from rk3588_mobile_sr.utils.sr_metrics import (
     ValidationMetrics,
     batch_psnr,
     batch_y_psnr,

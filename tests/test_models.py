@@ -2,7 +2,7 @@
 
 import torch
 
-from models import MobileOneBlock, MobileOneSR
+from rk3588_mobile_sr.models import MobileOneBlock, MobileOneSR
 
 
 def test_mobileone_sr_forward_shape():
