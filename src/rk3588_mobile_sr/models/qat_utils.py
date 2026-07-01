@@ -87,3 +87,44 @@ def bn_recalibrate(model: nn.Module, loader: Any, device: torch.device, batches:
                 break
             lr = lr.to(device)
             _ = model(lr)
+
+
+def _filter_qat_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Keep only float conv/linear tensors from a prepared QAT state dict."""
+    return {
+        key: value
+        for key, value in state_dict.items()
+        if not any(
+            token in key
+            for token in ("fake_quant", "observer", "activation_post_process")
+        )
+    }
+
+
+def load_deploy_float_from_qat_checkpoint(
+    model: MobileOneSR,
+    state_dict: dict[str, torch.Tensor],
+    *,
+    identity_var_floor: float = 0.0,
+) -> MobileOneSR:
+    """Load QAT weights into a fused deploy float graph for ONNX / RKNN export."""
+    model.switch_to_deploy(identity_var_floor=identity_var_floor)
+    model = fuse_stem(model)
+    filtered = _filter_qat_state_dict(state_dict)
+    model.load_state_dict(filtered, strict=True)
+    return model
+
+
+def load_qat_checkpoint_for_export(
+    model: MobileOneSR,
+    state_dict: dict[str, torch.Tensor],
+    example_inputs: tuple[torch.Tensor, ...],
+    backend: str = "qnnpack",
+) -> torch.fx.GraphModule:
+    """Load Stage-3 QAT weights into fused deploy graph for RKNN-friendly ONNX export."""
+    prepared = prepare_model_for_qat(model, backend=backend, example_inputs=example_inputs)
+    prepared.load_state_dict(state_dict, strict=False)
+    prepared.eval()
+    torch.ao.quantization.disable_observer(prepared)
+    torch.ao.quantization.disable_fake_quant(prepared)
+    return prepared

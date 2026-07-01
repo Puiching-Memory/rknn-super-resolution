@@ -33,8 +33,8 @@ stage2:
   lr: 3.0e-5
   lambda_dct: 0.02
   lambda_kd: 0.03
-  teacher_arch: "edsr"
-  teacher_weight: "checkpoints/teacher/edsr_x3.pth"
+  teacher_arch: "mambairv2_light"
+  teacher_weight: "checkpoints/teacher/mambairv2_lightSR_x3.pth"
 
 stage3_qat:
   patch_size: 144
@@ -56,3 +56,6 @@ deploy:
   onnx_output: "mobileone_sr_x3.onnx"
   rknn_output: "mobileone_sr_x3.rknn"
   calib_dir: "data/rknn_calib.txt"
+  rknn_python: ".venv-rknn/bin/python"
+  rknn_quantize: "kl_divergence"
+  rknn_quantized_method: "channel"

@@ -161,10 +161,23 @@ def main():
             )
             if ctx.is_main:
                 torch.save(ema_model.state_dict(), session.save_dir / "last_ema.pth")
-                quantized = convert_qat_model(train_model)
-                torch.jit.save(
-                    torch.jit.script(quantized), str(session.save_dir / "quantized.pt")
-                )
+                try:
+                    quantized = convert_qat_model(train_model)
+                    torch.save(
+                        quantized.state_dict(),
+                        session.save_dir / "quantized_state_dict.pth",
+                    )
+                    logger.info(
+                        "Saved PyTorch INT8 state_dict to quantized_state_dict.pth. "
+                        "For RKNN deploy, export FP32 ONNX with: "
+                        "rk3588-mobile-sr export-onnx --from-qat --weight <best_ema.pth>."
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Post-training convert_qat_model failed ({}). "
+                        "QAT checkpoints are still valid for --from-qat ONNX export.",
+                        exc,
+                    )
         finally:
             session.finalize()
 

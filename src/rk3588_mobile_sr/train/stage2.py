@@ -10,7 +10,7 @@ from rk3588_mobile_sr.distributed import (
 )
 from rk3588_mobile_sr.distributed.validation import EarlyStopState, ValidationConfig
 from rk3588_mobile_sr.losses import Stage2Loss
-from rk3588_mobile_sr.models.teacher_wrapper import load_teacher
+from rk3588_mobile_sr.models.teacher_wrapper import TEACHER_ARCH_CHOICES, load_teacher
 from rk3588_mobile_sr.train.session import TrainSession
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.train_framework import (
@@ -26,7 +26,7 @@ def parse_args():
     add_common_args(parser)
     parser.set_defaults(
         patch_size=160,
-        batch_size=64,
+        batch_size=32,
         lr=6e-5,
         log_every=500,
         save_dir="./checkpoints/stage2",
@@ -37,8 +37,12 @@ def parse_args():
     parser.add_argument("--early_stop_patience", type=int, default=8)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.005)
     parser.add_argument("--no_early_stop", action="store_true")
-    parser.add_argument("--teacher_arch", type=str, required=True, choices=["real_esrgan", "edsr"])
-    parser.add_argument("--teacher_weight", type=str, required=True)
+    parser.add_argument("--teacher_arch", type=str, default="mambairv2_light", choices=TEACHER_ARCH_CHOICES)
+    parser.add_argument(
+        "--teacher_weight",
+        type=str,
+        default="checkpoints/teacher/mambairv2_lightSR_x3.pth",
+    )
     parser.add_argument("--stage1_weight", type=str, required=True)
     parser.add_argument("--lambda_dct", type=float, default=0.02)
     parser.add_argument("--lambda_kd", type=float, default=0.03)
@@ -73,7 +77,7 @@ def main():
             args.teacher_weight,
             scale=args.scale,
             device=str(ctx.device),
-            compile_model=args.compile,
+            compile_model=False,
         )
         stage2_loss = Stage2Loss(lambda_dct=args.lambda_dct, lambda_kd=args.lambda_kd)
         loaders = session.build_loaders()

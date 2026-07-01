@@ -52,8 +52,8 @@ class Stage2Config:
     lr: float = 3e-5
     lambda_dct: float = 0.02
     lambda_kd: float = 0.03
-    teacher_arch: str = "edsr"
-    teacher_weight: str = "checkpoints/teacher/edsr_x3.pth"
+    teacher_arch: str = "mambairv2_light"
+    teacher_weight: str = "checkpoints/teacher/mambairv2_lightSR_x3.pth"
 
 
 @dataclass
@@ -79,6 +79,9 @@ class DeployConfig:
     onnx_output: str = "mobileone_sr_x3.onnx"
     rknn_output: str = "mobileone_sr_x3.rknn"
     calib_dir: str = "data/rknn_calib.txt"
+    rknn_python: str = ".venv-rknn/bin/python"
+    rknn_quantize: str = "kl_divergence"
+    rknn_quantized_method: str = "channel"
 
 
 @dataclass

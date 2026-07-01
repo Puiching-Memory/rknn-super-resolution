@@ -46,8 +46,7 @@ rk3588_mobile_sr/
 │   ├── distributed/               # DDP 上下文、验证、同步原语
 │   ├── train/                     # StepTrainer、TrainSession、Stage 1/2/3
 │   ├── eval/                      # PSNR/SSIM 评测
-│   ├── export/                    # ONNX 导出
-│   └── deploy/                    # RKNN 转换模板
+│   └── deploy/                    # ONNX 导出 + RKNN 转换与精度评测
 ├── scripts/                       # 开发与性能分析脚本
 ├── tests/                         # 单元测试
 ├── docs/
@@ -66,7 +65,7 @@ uv sync
 开发依赖（ruff、pytest、pre-commit）：
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVIDIA PyPI）。
@@ -190,7 +189,14 @@ Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次�
 
 ### Stage 2：蒸馏 + 感知损失微调
 
-与 Stage 1 相同，采用 **step-based** 训练（LMDB 无限随机采样）：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证，每 `--log_every 500` step 打日志。默认启用 **早停**：连续 `--early_stop_patience`（8）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.005 dB）则停止；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（如 EDSR），默认路径 `checkpoints/teacher/edsr_x3.pth`。
+与 Stage 1 相同，采用 **step-based** 训练（LMDB 无限随机采样）：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证，每 `--log_every 500` step 打日志。默认启用 **早停**：连续 `--early_stop_patience`（8）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.005 dB）则停止；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（MambaIRv2Light ×3），默认路径 `checkpoints/teacher/mambairv2_lightSR_x3.pth`：
+
+```bash
+# GitHub 下载需代理时先设置（按你的代理地址修改）
+export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897
+
+uv run python scripts/download_mambairv2_teacher.py
+```
 
 ```bash
 torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
@@ -198,8 +204,8 @@ torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
   --lr_dir data/DIV2K_train_LR_bicubic/X3 \
   --val_hr_dir data/DIV2K_valid_HR \
   --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
-  --teacher_arch edsr \
-  --teacher_weight checkpoints/teacher/edsr_x3.pth \
+  --teacher_arch mambairv2_light \
+  --teacher_weight checkpoints/teacher/mambairv2_lightSR_x3.pth \
   --stage1_weight checkpoints/stage1/best.pth \
   --save_dir ./checkpoints/stage2
 ```
@@ -259,7 +265,7 @@ uv run rk3588-mobile-sr eval \
 
 ## RKNN 部署转换
 
-> `rknn_convert.py` 当前为模板脚本，需要在已安装 `rknn-toolkit2` 的环境中补全 RKNN API 调用。
+> RKNN 转换与 FP32/INT8 精度对比见 `src/rk3588_mobile_sr/deploy/rknn.py`（需在独立 rknn-toolkit2 环境中运行）。
 
 ```bash
 uv run rk3588-mobile-sr convert-rknn \

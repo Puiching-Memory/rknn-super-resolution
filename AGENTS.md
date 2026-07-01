@@ -17,7 +17,7 @@ uv sync
 For development (lint, tests, pre-commit):
 
 ```bash
-uv sync --extra dev
+uv sync
 ```
 
 PyTorch and DALI wheel sources are pinned in `pyproject.toml` under `[tool.uv.index]` and `[tool.uv.sources]`.

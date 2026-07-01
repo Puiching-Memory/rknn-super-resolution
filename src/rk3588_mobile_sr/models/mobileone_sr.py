@@ -56,8 +56,8 @@ class MobileOneSR(nn.Module):
         out = self.upsample(out)
         return out
 
-    def switch_to_deploy(self) -> None:
+    def switch_to_deploy(self, identity_var_floor: float = 0.0) -> None:
         """Fuse all MobileOne blocks into deploy mode."""
         for m in self.modules():
             if isinstance(m, MobileOneBlock):
-                m.reparameterize()
+                m.reparameterize(identity_var_floor=identity_var_floor)

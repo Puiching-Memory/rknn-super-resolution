@@ -1,1 +1,1 @@
-"""Deployment utilities (ONNX → RKNN)."""
+"""Deployment pipeline: PyTorch → ONNX → RKNN."""

@@ -10,6 +10,8 @@ def test_load_default_config():
     assert cfg.model.num_channels == 32
     assert cfg.stage1.patch_size == 128
     assert cfg.deploy.input_h == 360
+    assert cfg.deploy.rknn_python == ".venv-rknn/bin/python"
+    assert cfg.deploy.rknn_quantize == "kl_divergence"
 
 
 def test_load_config_from_path():

@@ -7,10 +7,10 @@ from typing import NoReturn
 
 import typer
 
+from rk3588_mobile_sr.deploy.onnx import main as export_main
 from rk3588_mobile_sr.deploy.rknn import main as rknn_main
 from rk3588_mobile_sr.eval.psnr import evaluate
 from rk3588_mobile_sr.eval.psnr import parse_args as eval_parse_args
-from rk3588_mobile_sr.export.onnx import main as export_main
 from rk3588_mobile_sr.train.stage1 import main as train_stage1_main
 from rk3588_mobile_sr.train.stage2 import main as train_stage2_main
 from rk3588_mobile_sr.train.stage3_qat import main as train_stage3_main

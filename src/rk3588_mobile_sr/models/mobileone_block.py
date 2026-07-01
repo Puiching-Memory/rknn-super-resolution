@@ -83,10 +83,13 @@ class MobileOneBlock(nn.Module):
             out += self.identity(x)
         return self.relu(out)
 
-    def reparameterize(self) -> None:
+    def reparameterize(self, identity_var_floor: float = 0.0) -> None:
         """Fuse multi-branch weights into a single Conv2d."""
         if self.inference_mode:
             return
+
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
 
         deploy_conv = nn.Conv2d(
             self.in_channels,
@@ -95,10 +98,10 @@ class MobileOneBlock(nn.Module):
             stride=self.stride,
             padding=self.padding,
             bias=True,
-        )
+        ).to(device=device, dtype=dtype)
 
         kernel = torch.zeros_like(deploy_conv.weight.data)
-        bias = torch.zeros(self.out_channels)
+        bias = torch.zeros(self.out_channels, device=device, dtype=dtype)
 
         for branch in self.conv_branches:
             conv, bn = branch[0], branch[1]
@@ -111,9 +114,14 @@ class MobileOneBlock(nn.Module):
         bias += b1x1
 
         if self.identity is not None:
-            k_id, b_id = self._fuse_bn(self.identity)
+            k_id, b_id = self._fuse_bn(self.identity, var_floor=identity_var_floor)
             kernel_eye = torch.zeros(
-                self.out_channels, self.in_channels, self.kernel_size, self.kernel_size
+                self.out_channels,
+                self.in_channels,
+                self.kernel_size,
+                self.kernel_size,
+                device=device,
+                dtype=dtype,
             )
             mid = self.kernel_size // 2
             for i in range(min(self.out_channels, self.in_channels)):
@@ -145,8 +153,11 @@ class MobileOneBlock(nn.Module):
         return kernel, bias
 
     @staticmethod
-    def _fuse_bn(bn: nn.BatchNorm2d):
-        std = (bn.running_var + bn.eps).sqrt()
+    def _fuse_bn(bn: nn.BatchNorm2d, *, var_floor: float = 0.0):
+        running_var = bn.running_var
+        if var_floor > 0.0:
+            running_var = running_var.clamp_min(var_floor)
+        std = (running_var + bn.eps).sqrt()
         weight = bn.weight / std
         bias = bn.bias - bn.running_mean * bn.weight / std
         return weight, bias

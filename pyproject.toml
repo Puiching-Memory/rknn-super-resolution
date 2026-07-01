@@ -7,6 +7,7 @@ requires-python = "==3.12.*"
 license = { text = "MIT" }
 dependencies = [
     "onnx>=1.17",
+    "onnxscript>=0.7",
     "nvidia-dali-cuda130>=2.1.0",
     "lmdb>=1.4",
     "loguru>=0.7",
@@ -20,11 +21,9 @@ dependencies = [
     "torchvision>=0.27.0",
     "traceml-ai>=0.3.1",
     "typer>=0.12.0",
-    "torchsr>=1.0.4",
-]
-
-[project.optional-dependencies]
-dev = [
+    "einops>=0.8.0",
+    "causal-conv1d>=1.4.0",
+    "mamba-ssm>=2.2.0",
     "pre-commit>=3.7",
     "pytest>=8.0",
     "ruff>=0.6.0",
@@ -40,9 +39,10 @@ rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
 rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
 rk3588-train-stage3-qat = "rk3588_mobile_sr.train.stage3_qat:main"
 rk3588-build-div2k-lmdb = "rk3588_mobile_sr.data.div2k_lmdb:main"
-rk3588-export-onnx = "rk3588_mobile_sr.export.onnx:main"
+rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
+rk3588-relu-audit = "rk3588_mobile_sr.deploy.relu_audit:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
@@ -58,6 +58,10 @@ explicit = true
 name = "nvidia"
 url = "https://pypi.nvidia.com"
 explicit = true
+
+[tool.uv.extra-build-dependencies]
+mamba-ssm = ["torch", "ninja", "packaging"]
+causal-conv1d = ["torch", "ninja", "packaging"]
 
 [build-system]
 requires = ["hatchling"]

@@ -85,13 +85,12 @@ def _init_process_group(
         device_id = torch.device(f"cuda:{rank % torch.cuda.device_count()}")
     torch.cuda.set_device(device_id)
 
-    if world_size > 1:
-        dist.init_process_group(
-            "nccl",
-            rank=rank,
-            world_size=world_size,
-            device_id=device_id,
-        )
+    if not dist.is_initialized():
+        backend = "nccl" if world_size > 1 else "gloo"
+        init_kwargs: dict = {"backend": backend, "rank": rank, "world_size": world_size}
+        if backend == "nccl":
+            init_kwargs["device_id"] = device_id
+        dist.init_process_group(**init_kwargs)
 
     return DistributedContext(rank=rank, world_size=world_size, device=device_id)
 
@@ -108,5 +107,5 @@ def distributed_session(
     try:
         yield ctx
     finally:
-        if ctx.world_size > 1 and dist.is_initialized():
+        if dist.is_initialized():
             dist.destroy_process_group()
