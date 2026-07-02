@@ -43,6 +43,7 @@ rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
 rk3588-relu-audit = "rk3588_mobile_sr.deploy.relu_audit:main"
+rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }
