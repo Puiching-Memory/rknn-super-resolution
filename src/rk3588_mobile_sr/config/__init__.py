@@ -82,6 +82,8 @@ class DeployConfig:
     rknn_python: str = ".venv-rknn/bin/python"
     rknn_quantize: str = "kl_divergence"
     rknn_quantized_method: str = "channel"
+    rknn_encrypt: bool = False
+    rknn_crypt_level: int = 1
 
 
 @dataclass

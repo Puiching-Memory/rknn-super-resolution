@@ -180,10 +180,52 @@ def _rknn_output_to_hwc(output: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 255.0)
 
 
-def infer_rknn_rgb(runtime: _RknnRuntime, lr_rgb: np.ndarray) -> np.ndarray:
+def rgb_to_nv12_planes(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """RGB HWC uint8 -> RKNN NV12 Y/UV planes as NHWC batches (1,H,W,1) and (1,H/2,W,1)."""
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError(f"Expected RGB HWC image, got shape {rgb.shape}")
+    h, w = rgb.shape[:2]
+    if h % 2 != 0 or w % 2 != 0:
+        raise ValueError(f"NV12 requires even H and W, got {h}x{w}")
+
+    if cv2 is not None:
+        # Match standard NV12 packing (closer to MPP/RGA buffers than hand-rolled BT.601).
+        packed = cv2.cvtColor(rgb, cv2.COLOR_RGB2YUV_NV12)
+        y = packed[:h, :w]
+        uv = packed[h:, :w]
+    else:
+        rgb_f = rgb.astype(np.float32)
+        r, g, b = rgb_f[..., 0], rgb_f[..., 1], rgb_f[..., 2]
+        y = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0.0, 255.0).astype(np.uint8)
+        u = np.clip(-0.169 * r - 0.331 * g + 0.5 * b + 128.0, 0.0, 255.0).astype(np.uint8)
+        v = np.clip(0.5 * r - 0.419 * g - 0.081 * b + 128.0, 0.0, 255.0).astype(np.uint8)
+        u_ds = u.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3)).astype(np.uint8)
+        v_ds = v.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3)).astype(np.uint8)
+        uv = np.empty((h // 2, w), dtype=np.uint8)
+        uv[:, 0::2] = u_ds
+        uv[:, 1::2] = v_ds
+
+    y_batch = y[np.newaxis, ..., np.newaxis]
+    uv_batch = uv[np.newaxis, ..., np.newaxis]
+    return y_batch, uv_batch
+
+
+def infer_rknn_rgb(
+    runtime: _RknnRuntime,
+    lr_rgb: np.ndarray,
+    *,
+    input_nv12: bool = False,
+) -> np.ndarray:
     """Run RKNN simulator / runtime on one LR RGB uint8 image."""
-    batch = np.expand_dims(lr_rgb.astype(np.uint8), axis=0)
-    outputs = runtime.inference(inputs=[batch], data_format="nhwc")
+    if input_nv12:
+        y_batch, uv_batch = rgb_to_nv12_planes(lr_rgb)
+        outputs = runtime.inference(
+            inputs=[y_batch, uv_batch],
+            data_format=["nhwc", "nhwc"],
+        )
+    else:
+        batch = np.expand_dims(lr_rgb.astype(np.uint8), axis=0)
+        outputs = runtime.inference(inputs=[batch], data_format="nhwc")
     return _rknn_output_to_hwc(outputs[0])
 
 
@@ -242,6 +284,7 @@ def evaluate_accuracy(
     *,
     fp32_predictor,
     quant_mode: str,
+    input_nv12: bool = False,
 ) -> AccuracyReport:
     if not pairs:
         raise ValueError("No validation images found for RKNN accuracy eval.")
@@ -254,7 +297,7 @@ def evaluate_accuracy(
     match_psnrs: list[float] = []
 
     for pair in pairs:
-        sr_rknn = infer_rknn_rgb(runtime, pair.lr_rgb)
+        sr_rknn = infer_rknn_rgb(runtime, pair.lr_rgb, input_nv12=input_nv12)
         rknn_psnrs.append(psnr_numpy(sr_rknn, pair.hr_rgb))
         rknn_ssims.append(ssim_numpy(sr_rknn, pair.hr_rgb))
 
@@ -404,6 +447,7 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         pairs,
         fp32_predictor=fp32_predictor,
         quant_mode=quant_mode,
+        input_nv12=getattr(args, "input_nv12", False),
     )
     print()
     print(format_accuracy_table(report))

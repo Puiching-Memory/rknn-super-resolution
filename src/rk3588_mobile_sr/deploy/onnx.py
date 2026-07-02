@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
+import torch.nn as nn
 from torch.export import Dim
 
 from rk3588_mobile_sr.config import load_config
@@ -11,6 +12,17 @@ from rk3588_mobile_sr.deploy.export_prep import clip_deploy_weights, fused_weigh
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
 from rk3588_mobile_sr.models.qat_utils import load_deploy_float_from_qat_checkpoint
 from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict, require_cuda
+
+
+class _NHWCOutputWrapper(nn.Module):
+    """Append NCHW -> NHWC permute for RKNN / RGA-friendly output layout."""
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x).permute(0, 2, 3, 1)
 
 
 def parse_args():
@@ -65,7 +77,25 @@ def parse_args():
         default=None,
         help="Clip fused conv weights after deploy fuse. Default: on for --from-qat, off for float.",
     )
+    parser.add_argument(
+        "--output-nhwc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Permute ONNX output to NHWC (1,H,W,3). Default off: adds RKNN Transpose, "
+            "~3x internal memory vs NCHW; prefer NCHW export + on-board RGA convert."
+        ),
+    )
     return parser.parse_args()
+
+
+def _warn_output_nhwc_enabled() -> None:
+    print(
+        "WARNING: --output-nhwc appends NCHW→NHWC Transpose in the graph. "
+        "RKNN may insert an extra layout op (~32 MB/frame RW at 1080p) and internal "
+        "tensor memory can grow ~3x vs default NCHW. Accuracy is unchanged; latency/"
+        "memory usually favor NCHW export + RGA format convert on the board."
+    )
 
 
 def main():
@@ -121,6 +151,12 @@ def main():
             clip_max=clip_max,
             do_bn_recalibrate=args.bn_recalibrate,
         )
+
+    if args.output_nhwc:
+        _warn_output_nhwc_enabled()
+        model = _NHWCOutputWrapper(model)
+        model.eval()
+        print("--> Output layout: NHWC (1, H, W, 3)")
 
     dummy_input = torch.randn(1, 3, args.input_h, args.input_w).to(device)
     export_kwargs: dict = {

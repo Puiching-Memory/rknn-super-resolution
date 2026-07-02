@@ -85,8 +85,73 @@ def parse_args():
         default=None,
         help="RKNN-dedicated Python interpreter (default: deploy.rknn_python or RK3588_RKNN_PYTHON).",
     )
+    parser.add_argument(
+        "--input-nv12",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Accept NV12 at runtime (RKNN inserts yuv2rgb). Default off: larger graph, "
+            "PC simulator eval is unreliable; validate on-board with real MPP/RGA buffers."
+        ),
+    )
+    parser.add_argument(
+        "--encrypt",
+        action=argparse.BooleanOptionalAction,
+        default=deploy.rknn_encrypt,
+        help=(
+            "After export, encrypt the RKNN via export_encrypted_rknn_model "
+            "(decrypted automatically by the NPU driver at load time)."
+        ),
+    )
+    parser.add_argument(
+        "--crypt-level",
+        type=int,
+        default=deploy.rknn_crypt_level,
+        choices=[1, 2, 3],
+        help="Encryption level 1–3: higher is more secure but slower to decrypt on-device.",
+    )
+    parser.add_argument(
+        "--encrypted-output",
+        type=str,
+        default=None,
+        help="Encrypted model path; default: {output_stem}.crypt.rknn (RKNN toolkit convention).",
+    )
     add_eval_args(parser)
     return parser.parse_args()
+
+
+def _warn_input_nv12_enabled(*, for_eval: bool) -> None:
+    print(
+        "WARNING: --input-nv12 injects yuv2rgb at the graph top (Y + UV inputs). "
+        "Expect a larger RKNN model and extra NPU/CPU work vs RGB input. "
+        "Training/calibration remain RGB; board-side NV12 must match MPP/RGA layout."
+    )
+    if for_eval:
+        print(
+            "WARNING: NV12 accuracy in the PC simulator uses RGB→NV12 conversion and "
+            "does not match real decoder buffers — treat simulator PSNR as non-authoritative."
+        )
+
+
+def _warn_nhwc_onnx_output(onnx_path: Path) -> None:
+    try:
+        import onnx
+    except ImportError:
+        return
+    model = onnx.load(str(onnx_path))
+    if not model.graph.output:
+        return
+    dims = [
+        d.dim_value
+        for d in model.graph.output[0].type.tensor_type.shape.dim
+        if d.dim_value > 0
+    ]
+    if len(dims) == 4 and dims[-1] in (1, 3) and dims[1] not in (1, 3):
+        print(
+            "WARNING: ONNX output looks NHWC "
+            f"{dims}. RKNN will compile an extra Transpose (memory/latency cost). "
+            "Prefer default NCHW ONNX unless the consumer requires NHWC from RKNN."
+        )
 
 
 def _stem_from_onnx(onnx_path: Path) -> str:
@@ -102,6 +167,14 @@ def _hybrid_artifacts(workdir: Path, onnx_path: Path) -> tuple[Path, Path, Path]
     )
 
 
+def _resolve_calib_dir(path: str) -> str:
+    """Resolve calibration list to an absolute path (hybrid step1 may chdir)."""
+    calib = Path(path).expanduser()
+    if not calib.is_absolute():
+        calib = (Path.cwd() / calib).resolve()
+    return str(calib)
+
+
 def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
     kwargs = {
         "mean_values": [[0, 0, 0]],
@@ -111,6 +184,8 @@ def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
     }
     if do_quantization:
         kwargs["quantized_method"] = args.quantized_method
+    if args.input_nv12:
+        kwargs["inputs_yuv_fmt"] = ["nv12"]
     return kwargs
 
 
@@ -136,11 +211,12 @@ def _run_hybrid_build(
         data_path = workdir / f"{stem}.data"
     elif args.hybrid == "proposal":
         print("--> Hybrid step 1 (proposal)")
+        calib_dir = _resolve_calib_dir(args.calib_dir)
         prev_cwd = os.getcwd()
         try:
             os.chdir(workdir)
             ret = rknn.hybrid_quantization_step1(
-                dataset=args.calib_dir,
+                dataset=calib_dir,
                 proposal=True,
                 proposal_dataset_size=args.hybrid_proposal_images,
             )
@@ -170,6 +246,52 @@ def _run_hybrid_build(
     return "INT8+FP16 hybrid"
 
 
+def _default_encrypted_output(output: Path) -> Path:
+    """Match rknn-toolkit2 default: ``foo.rknn`` -> ``foo.crypt.rknn``."""
+    return output.with_suffix(".crypt.rknn")
+
+
+def _resolve_encrypted_output(output: Path, explicit: str | None) -> Path:
+    if explicit:
+        enc = Path(explicit).expanduser()
+        if not enc.is_absolute():
+            enc = (Path.cwd() / enc).resolve()
+        return enc
+    return _default_encrypted_output(output)
+
+
+def _export_rknn(
+    rknn,
+    output: str,
+    *,
+    encrypt: bool,
+    crypt_level: int,
+    encrypted_output: str | None,
+) -> None:
+    out_path = Path(output)
+    print("--> Export RKNN")
+    ret = rknn.export_rknn(output)
+    if ret != 0:
+        print("Export RKNN failed!")
+        sys.exit(ret)
+    print(f"RKNN exported to {output}")
+
+    if not encrypt:
+        return
+
+    enc_path = _resolve_encrypted_output(out_path, encrypted_output)
+    print(f"--> Encrypt RKNN (crypt_level={crypt_level})")
+    ret = rknn.export_encrypted_rknn_model(
+        str(out_path),
+        output_model=str(enc_path),
+        crypt_level=crypt_level,
+    )
+    if ret != 0:
+        print("Encrypt RKNN failed!")
+        sys.exit(ret)
+    print(f"Encrypted RKNN exported to {enc_path}")
+
+
 def _parse_input_size(spec: str) -> list[int]:
     parts = [int(x.strip()) for x in spec.split(",")]
     if len(parts) != 3:
@@ -185,6 +307,7 @@ def main():
 
     RKNN = import_rknn()
     do_quantization = args.do_quantization and not args.no_quantization
+    args.calib_dir = _resolve_calib_dir(args.calib_dir)
     _parse_input_size(args.input_size)
     onnx_path = Path(args.onnx)
     use_hybrid = args.hybrid is not None or args.hybrid_cfg is not None
@@ -196,6 +319,10 @@ def main():
     rknn = RKNN(verbose=True)
     try:
         print("--> Config model")
+        if args.input_nv12:
+            _warn_input_nv12_enabled(for_eval=args.eval)
+            print("--> Input format: NV12 (yuv2rgb injected at graph top)")
+        _warn_nhwc_onnx_output(onnx_path)
         ret = rknn.config(**_config_kwargs(args, do_quantization=do_quantization))
         if ret != 0:
             print("Config model failed!")
@@ -235,15 +362,15 @@ def main():
                 sys.exit(ret)
             run_post_build_eval(args, rknn, quant_mode=quant_mode)
 
-        print("--> Export RKNN")
-        ret = rknn.export_rknn(args.output)
-        if ret != 0:
-            print("Export RKNN failed!")
-            sys.exit(ret)
+        _export_rknn(
+            rknn,
+            args.output,
+            encrypt=args.encrypt,
+            crypt_level=args.crypt_level,
+            encrypted_output=args.encrypted_output,
+        )
     finally:
         rknn.release()
-
-    print(f"RKNN exported to {args.output}")
 
 
 if __name__ == "__main__":

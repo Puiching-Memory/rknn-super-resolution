@@ -6,10 +6,12 @@ from rk3588_mobile_sr.deploy.rknn_eval import (
     AccuracyReport,
     AccuracyRow,
     ImagePair,
+    _rknn_output_to_hwc,
     collect_image_pairs,
     format_accuracy_table,
     infer_rknn_rgb,
     psnr_numpy,
+    rgb_to_nv12_planes,
     ssim_numpy,
 )
 
@@ -58,6 +60,19 @@ def test_infer_rknn_rgb_nhwc_batch():
     out = infer_rknn_rgb(_FakeRuntime(), lr)
     assert out.shape == (1080, 1920, 3)
     assert out.dtype == np.float32
+
+
+def test_rknn_output_to_hwc_accepts_nhwc():
+    nhwc = np.full((1080, 1920, 3), 128.0, dtype=np.float32)
+    out = _rknn_output_to_hwc(nhwc[None, ...])
+    assert out.shape == (1080, 1920, 3)
+
+
+def test_rgb_to_nv12_planes_shape():
+    rgb = np.zeros((360, 640, 3), dtype=np.uint8)
+    y, uv = rgb_to_nv12_planes(rgb)
+    assert y.shape == (1, 360, 640, 1)
+    assert uv.shape == (1, 180, 640, 1)
 
 
 def test_collect_image_pairs_resizes(tmp_path):
