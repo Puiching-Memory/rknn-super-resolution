@@ -9,7 +9,6 @@ dependencies = [
     "onnx>=1.17",
     "onnxscript>=0.7",
     "nvidia-dali-cuda130>=2.1.0",
-    "lmdb>=1.4",
     "loguru>=0.7",
     "pillow>=10.0",
     "pyyaml>=6.0",
@@ -29,6 +28,8 @@ dependencies = [
     "ruff>=0.6.0",
     "kornia>=0.8.3",
     "pyiqa>=0.1.15.post2",
+    "pydantic>=2",
+    "snakemake>=8",
 ]
 
 # RKNN conversion is typically done in a separate environment because
@@ -40,9 +41,9 @@ rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
 rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
 rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
 rk3588-train-stage3-qat = "rk3588_mobile_sr.train.stage3_qat:main"
-rk3588-build-train-manifest = "rk3588_mobile_sr.data.manifest_cli:build_train_manifest"
-rk3588-build-val-codec-fixed = "rk3588_mobile_sr.data.manifest_cli:build_val_codec_fixed"
-rk3588-build-codec-cache = "rk3588_mobile_sr.data.codec_build:main"
+rk3588-build-train-manifest = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
+rk3588-build-val-codec-fixed = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
+rk3588-build-codec-cache = "rk3588_mobile_sr.data_pipeline.cli:main"
 rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"

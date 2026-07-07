@@ -15,7 +15,7 @@ from rk3588_mobile_sr.data.codec_index import (
 )
 from rk3588_mobile_sr.data.types import SourceRecord
 from rk3588_mobile_sr.data.train_loader import TrainDataSettings, build_codec_train_loader, nvidia_cuvid_available
-from tests.test_codec_offline import _build_fixture
+from tests.helpers.codec_fixture import build_snakemake_codec_fixture as _build_fixture
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
 

@@ -78,9 +78,12 @@ final_summary.json
 *.tgz
 *.safetensors
 *.ckpt
+*.pkl
 
-# Datasets (local DIV2K / LMDB; keep out of git)
+# Datasets and build intermediates (keep out of git)
 /data/
+data/scaled_cache/
+.snakemake/
 
 # TensorBoard event files
 *.tfevents.*

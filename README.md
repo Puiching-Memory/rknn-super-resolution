@@ -39,7 +39,8 @@ rk3588_mobile_sr/
 ├── src/rk3588_mobile_sr/          # 可安装包（src layout）
 │   ├── cli.py                     # 统一 CLI 入口
 │   ├── config/                    # YAML 配置加载
-│   ├── data/                      # Canvas codec 训练管线（DALI / TorchCodec）
+│   ├── data/                      # 训练期 manifest / loader（codec_index、DALI）
+│   ├── data_pipeline/             # 离线 codec cache 构建（Snakemake 配套 Python）
 │   ├── models/                    # MobileOneSR 模型与 QAT 工具
 │   ├── losses/                    # 训练损失函数
 │   ├── utils/                     # 训练框架、指标、日志
@@ -47,7 +48,7 @@ rk3588_mobile_sr/
 │   ├── train/                     # StepTrainer、TrainSession、Stage 1/2/3
 │   ├── eval/                      # PSNR/SSIM 评测
 │   └── deploy/                    # ONNX 导出 + RKNN 转换与精度评测
-├── scripts/                       # 运维与训练 bash 入口（调用 uv CLI）
+├── scripts/                       # 运维 bash 入口 + pipeline/Snakefile
 ├── tests/                         # 单元测试
 ├── docs/
 ├── pyproject.toml
@@ -95,36 +96,52 @@ uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage2/best.pth ...
 
 ## 数据准备
 
-训练数据由 **manifest JSONL** 描述异构源（UVG 1080p YUV + DIV2K HR 等），由 `rk3588-build-train-manifest` 生成：
+训练数据由 **manifest JSONL** 描述异构源（UVG 1080p YUV + DIV2K HR 等）。离线 LR codec cache 由 **Snakemake** 编排（代码在 `src/rk3588_mobile_sr/data_pipeline/`，DAG 在 `scripts/pipeline/`），训练侧仍读 `data/codec_cache/manifest.jsonl`。
 
 ```bash
-uv run rk3588-build-train-manifest   # -> data/sources/manifests/train.jsonl
-uv run rk3588-build-val-codec-fixed  # -> data/sources/manifests/val_fixed.jsonl
-uv run rk3588-build-codec-cache \    # -> data/codec_cache/manifest.jsonl (离线 LR MP4)
-  --sources data/sources/manifests/train.jsonl \
-  --clips-per-video 8 --bitrates 300,500,800
-
-# 或一键执行上述三步：
+# 一键：发现源 → 写 manifest → Snakemake 构建 codec cache
 ./scripts/build_data.sh
+
+# 或分步：
+uv run rk3588-build-train-manifest    # train.jsonl + val_fixed.jsonl（同一 discover 脚本）
+uv run rk3588-build-codec-cache       # snakemake -j$(nproc) all
+
+# 仅刷新 manifest（已有 mp4，不重编码）：
+uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest \
+  --root . \
+  --train-manifest data/sources/manifests/train.jsonl \
+  --output data/codec_cache/manifest.jsonl \
+  --cache-dir data/codec_cache \
+  --mezzanine-dir data/mezzanine
 ```
+
+`build_data.sh` 支持环境变量：`WORKERS`、`CLIPS_PER_VIDEO`、`BITRATES`；干跑传 `./scripts/build_data.sh -- -n`。
 
 目录结构示例：
 
 ```
 data/
 ├── sources/manifests/
-│   ├── train.jsonl              # UVG YUV 源（供 build-codec-cache）
-│   └── val_fixed.jsonl
-├── codec_cache/manifest.jsonl   # 离线 LR clip 索引
+│   ├── train.jsonl              # UVG + DIV2K 源
+│   └── val_fixed.jsonl          # 固定 UVG 验证行
+├── codec_cache/manifest.jsonl   # 离线 LR clip 索引（训练读取）
 ├── codec_cache/*.mp4            # 预编码 LR clips
-├── mezzanine/*_hr.mp4           # HR mezzanine
+├── mezzanine/*_hr.mp4           # HR mezzanine（DIV2K 为 8 帧 crop 槽位）
+├── scaled_cache/                # Snakemake 中间产物（rgb24，可删后重建）
 └── UVG_raw/yuv_1080p/           # 原始 1080p YUV420 序列
+
+scripts/pipeline/
+├── Snakefile                    # mezzanine → scale → lr_encode → manifest
+├── config.yaml                  # codecs / bitrates / clips 等
+└── ffmpeg/                      # 编码 shell 脚本
 ```
 
 默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线 codec cache + GPU 解码**：
 
-1. `rk3588-build-codec-cache` 预编码 LR clip 与 HR mezzanine MP4
+1. Snakemake 预编码 LR clip 与 HR mezzanine MP4，并写出 `codec_cache/manifest.jsonl`
 2. 训练时 `decode=auto` 优先 DALI NVDEC，无 `libnvcuvid` 时降级 TorchCodec
+
+DIV2K 对齐约定：mezzanine 第 `K` 帧对应 `clip_start=K`；`expand_codec_clip_frames` 中 `hr_frame = clip_start`。
 
 Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NVDEC。
 
@@ -134,7 +151,7 @@ Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NV
 
 | 脚本 | 用途 |
 |------|------|
-| `./scripts/build_data.sh` | 生成 train/val manifest + codec cache |
+| `./scripts/build_data.sh` | Snakemake 构建 train/val manifest + codec cache |
 | `./scripts/run_stage1_8gpu.sh` | Stage 1 八卡 DDP 训练 |
 | `./scripts/run_stage2.sh` | Stage 2 蒸馏微调 |
 | `./scripts/download_teacher.sh` | 下载 MambaIRv2Light 教师权重 |
