@@ -22,6 +22,8 @@ from rk3588_mobile_sr.utils.train_framework import (
     build_model,
     build_train_accel,
     make_optimizer,
+    resolve_colorspace,
+    resolve_prefetch_batches,
 )
 
 
@@ -135,7 +137,7 @@ def main():
             log_every=args.log_every,
             val_every=args.val_every,
             save_every=args.save_every,
-            prefetch_batches=args.prefetch_batches,
+            prefetch_batches=resolve_prefetch_batches(args),
             val_scale=args.scale,
         )
         val_config = ValidationConfig(
@@ -145,6 +147,8 @@ def main():
             deploy_check=False,
             vis_samples=args.vis_samples,
             vis_max_size=args.vis_max_size,
+            colorspace=resolve_colorspace(args),
+            data_preview=not args.no_data_preview,
         )
 
         try:

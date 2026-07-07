@@ -16,7 +16,7 @@ from .mobileone_sr import MobileOneSR
 
 
 def fuse_stem(model: MobileOneSR) -> MobileOneSR:
-    """Fuse stem Conv+BN+ReLU into Conv+ReLU for FX QAT."""
+    """Fuse stem Conv+BN+activation into Conv+activation for FX QAT."""
     conv, bn, relu = model.stem[0], model.stem[1], model.stem[2]
     std = (bn.running_var + bn.eps).sqrt()
     weight = conv.weight * (bn.weight / std).view(-1, 1, 1, 1)

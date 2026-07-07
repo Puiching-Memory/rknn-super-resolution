@@ -18,15 +18,17 @@ class MobileOneSR(nn.Module):
         scale: int = 3,
         num_conv_branches: int = 4,
         inference_mode: bool = False,
+        negative_slope: float = 0.1,
     ):
         super().__init__()
         self.scale = scale
         self.num_channels = num_channels
+        self.negative_slope = negative_slope
 
         self.stem = nn.Sequential(
             nn.Conv2d(in_channels, num_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(num_channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(negative_slope, inplace=True),
         )
 
         self.body = nn.Sequential(
@@ -36,6 +38,7 @@ class MobileOneSR(nn.Module):
                     num_channels,
                     num_conv_branches=num_conv_branches,
                     inference_mode=inference_mode,
+                    negative_slope=negative_slope,
                 )
                 for _ in range(num_blocks)
             ]

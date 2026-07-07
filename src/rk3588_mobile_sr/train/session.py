@@ -13,7 +13,11 @@ from rk3588_mobile_sr.distributed.validation import EarlyStopState, ValidationCo
 from rk3588_mobile_sr.train.loop import StepTrainer
 from rk3588_mobile_sr.train.types import LoaderBundle, TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.run_logger import logger, setup_run_logger
-from rk3588_mobile_sr.utils.swanlab_logging import finish_swanlab, setup_swanlab
+from rk3588_mobile_sr.utils.swanlab_logging import (
+    finish_swanlab,
+    resolve_swanlab_run_id,
+    setup_swanlab,
+)
 from rk3588_mobile_sr.utils.traceml_profiling import finish_traceml, setup_traceml
 from rk3588_mobile_sr.utils.train_framework import TrainAccel, build_loaders
 
@@ -40,13 +44,25 @@ class TrainSession:
             self.save_dir.mkdir(parents=True, exist_ok=True)
         self.ctx.barrier()
         setup_run_logger(self.save_dir, self.ctx.rank)
+        experiment_name = self.args.swanlab_experiment or self.experiment_name
+        resume_checkpoint = getattr(self.args, "resume", None)
+        swanlab_run_id = resolve_swanlab_run_id(
+            save_dir=self.save_dir,
+            project=self.args.swanlab_project,
+            experiment_name=experiment_name,
+            resume_checkpoint=resume_checkpoint,
+            explicit_run_id=getattr(self.args, "swanlab_run_id", None),
+        )
         setup_swanlab(
             rank=self.ctx.rank,
             save_dir=self.save_dir,
             project=self.args.swanlab_project,
-            experiment_name=self.args.swanlab_experiment or self.experiment_name,
+            experiment_name=experiment_name,
             config=vars(self.args),
             disabled=self.args.no_swanlab,
+            resume_training=resume_checkpoint is not None,
+            run_id=swanlab_run_id,
+            resume="must",
         )
         setup_traceml(self.args, rank=self.ctx.rank)
 
@@ -79,6 +95,7 @@ class TrainSession:
         validation_config: ValidationConfig | None = None,
         early_stop: EarlyStopState | None = None,
         model_diag: bool = True,
+        global_step: int = 0,
     ) -> int:
         trainer = StepTrainer(
             self.ctx,
@@ -93,6 +110,7 @@ class TrainSession:
             validation_config=validation_config,
             early_stop=early_stop,
             model_diag=model_diag,
+            global_step=global_step,
         )
         return trainer.run()
 

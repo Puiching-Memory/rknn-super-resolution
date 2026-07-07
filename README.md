@@ -39,7 +39,7 @@ rk3588_mobile_sr/
 ├── src/rk3588_mobile_sr/          # 可安装包（src layout）
 │   ├── cli.py                     # 统一 CLI 入口
 │   ├── config/                    # YAML 配置加载
-│   ├── data/                      # DIV2K 数据加载（DALI / LMDB / PyTorch）
+│   ├── data/                      # Canvas codec 训练管线（DALI / TorchCodec）
 │   ├── models/                    # MobileOneSR 模型与 QAT 工具
 │   ├── losses/                    # 训练损失函数
 │   ├── utils/                     # 训练框架、指标、日志
@@ -47,7 +47,7 @@ rk3588_mobile_sr/
 │   ├── train/                     # StepTrainer、TrainSession、Stage 1/2/3
 │   ├── eval/                      # PSNR/SSIM 评测
 │   └── deploy/                    # ONNX 导出 + RKNN 转换与精度评测
-├── scripts/                       # 开发与性能分析脚本
+├── scripts/                       # 运维与训练 bash 入口（调用 uv CLI）
 ├── tests/                         # 单元测试
 ├── docs/
 ├── pyproject.toml
@@ -79,10 +79,11 @@ PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVID
 # 查看帮助
 uv run rk3588-mobile-sr --help
 
-# 训练（DDP 仍用 torchrun 包装）
-torchrun --nproc_per_node=8 rk3588-mobile-sr train stage1 \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+# 训练（DDP 仍用 torchrun 包装；canvas codec 离线缓存 + NVDEC）
+torchrun --nproc_per_node=3 rk3588-mobile-sr train stage1 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
+  --val_manifest data/sources/manifests/val_fixed.jsonl \
+  --decode auto \
   ...
 
 # 评测 / 导出
@@ -94,15 +95,56 @@ uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage2/best.pth ...
 
 ## 数据准备
 
-使用 DIV2K 数据集，目录结构如下：
+训练数据由 **manifest JSONL** 描述异构源（UVG 1080p YUV + DIV2K HR 等），由 `rk3588-build-train-manifest` 生成：
+
+```bash
+uv run rk3588-build-train-manifest   # -> data/sources/manifests/train.jsonl
+uv run rk3588-build-val-codec-fixed  # -> data/sources/manifests/val_fixed.jsonl
+uv run rk3588-build-codec-cache \    # -> data/codec_cache/manifest.jsonl (离线 LR MP4)
+  --sources data/sources/manifests/train.jsonl \
+  --clips-per-video 8 --bitrates 300,500,800
+
+# 或一键执行上述三步：
+./scripts/build_data.sh
+```
+
+目录结构示例：
 
 ```
 data/
-├── DIV2K_train_HR/
-├── DIV2K_train_LR_bicubic/X3/
-├── DIV2K_valid_HR/
-└── DIV2K_valid_LR_bicubic/X3/
+├── sources/manifests/
+│   ├── train.jsonl              # UVG YUV 源（供 build-codec-cache）
+│   └── val_fixed.jsonl
+├── codec_cache/manifest.jsonl   # 离线 LR clip 索引
+├── codec_cache/*.mp4            # 预编码 LR clips
+├── mezzanine/*_hr.mp4           # HR mezzanine
+└── UVG_raw/yuv_1080p/           # 原始 1080p YUV420 序列
 ```
+
+默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线 codec cache + GPU 解码**：
+
+1. `rk3588-build-codec-cache` 预编码 LR clip 与 HR mezzanine MP4
+2. 训练时 `decode=auto` 优先 DALI NVDEC，无 `libnvcuvid` 时降级 TorchCodec
+
+Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NVDEC。
+
+### Bash 脚本（`scripts/`）
+
+推荐用 `scripts/` 下的 bash 入口启动训练与数据准备（内部统一 `uv run` + `torchrun -m ...`）：
+
+| 脚本 | 用途 |
+|------|------|
+| `./scripts/build_data.sh` | 生成 train/val manifest + codec cache |
+| `./scripts/run_stage1_8gpu.sh` | Stage 1 八卡 DDP 训练 |
+| `./scripts/run_stage2.sh` | Stage 2 蒸馏微调 |
+| `./scripts/download_teacher.sh` | 下载 MambaIRv2Light 教师权重 |
+| `./scripts/bench_dataloader.sh` | 单卡 DataLoader 吞吐 |
+| `./scripts/bench_ddp.sh` | 多卡 DDP step 吞吐 |
+| `./scripts/profile_stage1.sh` | 数据 vs 计算耗时剖析 |
+| `./scripts/generate_report_charts.sh` | 从 `stage1_metrics.json` 生成报告图 |
+| `./scripts/vendor_mambairv2_light.sh` | 从上游同步 MambaIR 结构 |
+
+环境变量示例：`SAVE_DIR`、`NPROC`、`RESUME`、`TRAIN_EXPERIMENT_NAME`、`EXTRA_ARGS`。
 
 ## 训练流程
 
@@ -146,18 +188,14 @@ torchrun --nproc_per_node=1 rk3588-mobile-sr train stage1 ... --swanlab_experime
 ```bash
 # 单卡
 traceml run rk3588-mobile-sr train stage1 \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
-  --val_hr_dir data/DIV2K_valid_HR \
-  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
+  --val_manifest data/sources/manifests/val_fixed.jsonl \
   --save_dir ./checkpoints/stage1
 
 # 多卡 DDP（TraceML 内置 --nproc-per-node，等价于 torchrun）
 traceml run rk3588-mobile-sr train stage1 --nproc-per-node=8 \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
-  --val_hr_dir data/DIV2K_valid_HR \
-  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
+  --val_manifest data/sources/manifests/val_fixed.jsonl \
   --save_dir ./checkpoints/stage1
 
 # 实时终端面板
@@ -174,12 +212,14 @@ traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
 ### Stage 1：FP32 基线
 
 ```bash
-torchrun --nproc_per_node=8 rk3588-mobile-sr train stage1 \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
-  --val_hr_dir data/DIV2K_valid_HR \
-  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
-  --patch_size 128 \
+# 推荐：bash 入口（日志写入 checkpoints/stage1/console.log）
+./scripts/run_stage1_8gpu.sh
+
+# 或手动 torchrun（注意用 -m 模块路径，勿直接写 rk3588-mobile-sr 文件名）
+uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.stage1 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
+  --val_manifest data/sources/manifests/val_fixed.jsonl \
+  --decode auto \
   --batch_size 16 \
   --lr 1e-3 \
   --save_dir ./checkpoints/stage1
@@ -189,21 +229,19 @@ Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次�
 
 ### Stage 2：蒸馏 + 感知损失微调
 
-与 Stage 1 相同，采用 **step-based** 训练（LMDB 无限随机采样）：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证，每 `--log_every 500` step 打日志。默认启用 **早停**：连续 `--early_stop_patience`（8）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.005 dB）则停止；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（MambaIRv2Light ×3），默认路径 `checkpoints/teacher/mambairv2_lightSR_x3.pth`：
+与 Stage 1 相同，采用 **step-based** 训练：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证。默认启用 **早停**；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（MambaIRv2Light ×3），默认路径 `checkpoints/teacher/mambairv2_lightSR_x3.pth`：
 
 ```bash
 # GitHub 下载需代理时先设置（按你的代理地址修改）
 export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897
 
-uv run python scripts/download_mambairv2_teacher.py
+uv run rk3588-download-teacher   # 或 ./scripts/download_teacher.sh
 ```
 
 ```bash
 torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
-  --val_hr_dir data/DIV2K_valid_HR \
-  --val_lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
+  --val_manifest data/sources/manifests/val_fixed.jsonl \
   --teacher_arch mambairv2_light \
   --teacher_weight checkpoints/teacher/mambairv2_lightSR_x3.pth \
   --stage1_weight checkpoints/stage1/best.pth \
@@ -223,8 +261,7 @@ torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
 ```bash
 torchrun --nproc_per_node=1 rk3588-mobile-sr train stage3-qat \
   --stage2_weight checkpoints/stage2/best.pth \
-  --hr_dir data/DIV2K_train_HR \
-  --lr_dir data/DIV2K_train_LR_bicubic/X3 \
+  --codec_manifest data/codec_cache/manifest.jsonl \
   --max_steps 15000 \
   --phase1_steps 3000 \
   --phase2_steps 9000 \

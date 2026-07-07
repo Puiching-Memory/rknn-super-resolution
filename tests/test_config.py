@@ -8,6 +8,11 @@ def test_load_default_config():
     assert isinstance(cfg, AppConfig)
     assert cfg.model.scale == 3
     assert cfg.model.num_channels == 32
+    assert cfg.model.negative_slope == 0.1
+    assert cfg.data.colorspace == "yuv"
+    assert cfg.data.codec_manifest.endswith("manifest.jsonl")
+    assert cfg.data.decode == "auto"
+    assert cfg.data.lr_size == (360, 640)
     assert cfg.stage1.patch_size == 128
     assert cfg.deploy.input_h == 360
     assert cfg.deploy.rknn_python == ".venv-rknn/bin/python"
@@ -18,4 +23,5 @@ def test_load_config_from_path():
     path = default_config_path()
     assert path.exists()
     cfg = load_config(path)
-    assert cfg.data.train_hr_dir.endswith("DIV2K_train_HR")
+    assert cfg.data.dali_num_threads == 4
+    assert cfg.data.prefetch_batches == 4

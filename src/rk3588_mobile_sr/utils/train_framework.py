@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import socket
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -13,85 +13,92 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 
-from rk3588_mobile_sr.data.div2k_dali import build_dali_train_loader
-from rk3588_mobile_sr.data.div2k_lmdb import build_lmdb_train_loader
-from rk3588_mobile_sr.data.div2k_loader import build_dataloader
+from rk3588_mobile_sr.config import load_config
+from rk3588_mobile_sr.data.train_loader import (
+    CodecTrainLoader,
+    build_codec_train_loader,
+    data_settings_from_args,
+)
+from rk3588_mobile_sr.data.val_loader import build_val_loader
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
 from rk3588_mobile_sr.utils.traceml_profiling import add_traceml_args
 
 
+def resolve_colorspace(args: argparse.Namespace) -> str:
+    """Resolve train/val colorspace from CLI or YAML (default yuv)."""
+    explicit = getattr(args, "colorspace", None)
+    if explicit:
+        return explicit
+    return load_config(getattr(args, "config", None)).data.colorspace
+
+
+def resolve_prefetch_batches(args: argparse.Namespace) -> int:
+    if getattr(args, "prefetch_batches", None) is not None:
+        return args.prefetch_batches
+    return load_config(getattr(args, "config", None)).data.prefetch_batches
+
+
 def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Add training arguments shared by all stages."""
-    parser.add_argument("--hr_dir", type=str, required=True)
-    parser.add_argument("--lr_dir", type=str, default=None)
-    parser.add_argument("--val_hr_dir", type=str, default=None)
-    parser.add_argument("--val_lr_dir", type=str, default=None)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="YAML config path (default: bundled mobileone_sr_x3.yaml)",
+    )
+    parser.add_argument(
+        "--codec_manifest",
+        type=str,
+        default=None,
+        help="offline codec clip manifest JSONL (default: data.codec_manifest from YAML)",
+    )
+    parser.add_argument(
+        "--val_manifest",
+        type=str,
+        default=None,
+        help="fixed validation manifest JSONL",
+    )
+    parser.add_argument(
+        "--decode",
+        type=str,
+        default=None,
+        choices=["auto", "dali", "torchcodec"],
+        help="video decode backend: auto (NVDEC when available), dali, or torchcodec",
+    )
     parser.add_argument("--scale", type=int, default=3)
     parser.add_argument("--num_channels", type=int, default=32)
     parser.add_argument("--num_blocks", type=int, default=8)
     parser.add_argument("--num_conv_branches", type=int, default=4)
+    parser.add_argument("--negative_slope", type=float, default=0.1)
+    parser.add_argument(
+        "--colorspace",
+        type=str,
+        default=None,
+        choices=["rgb", "yuv"],
+        help="train/val tensor layout: rgb or yuv444 (BT.601, [0,255])",
+    )
+    parser.add_argument(
+        "--no_nv12_simulate",
+        action="store_true",
+        help="disable NV12 4:2:0 chroma subsample simulation before YUV conversion",
+    )
     parser.add_argument("--patch_size", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=16, help="per-GPU batch size")
     parser.add_argument("--epochs", type=int, default=600)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--save_dir", type=str, default="./checkpoints")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument(
-        "--use_dali",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="use NVIDIA DALI for GPU-accelerated data loading",
-    )
-    parser.add_argument(
-        "--lmdb_dir",
-        type=str,
-        default=None,
-        help="prebuilt LMDB patch cache (takes priority over DALI when set)",
-    )
-    parser.add_argument(
-        "--lmdb_augment",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="apply flip/transpose augment when reading LMDB patches (online, each epoch)",
-    )
-    parser.add_argument(
-        "--dali_num_threads",
-        type=int,
-        default=8,
-        help="CPU threads per DALI pipeline",
-    )
-    parser.add_argument(
-        "--dali_min_steps_per_epoch",
-        type=int,
-        default=512,
-        help="repeat file list so each DDP rank has at least this many batches per epoch",
-    )
-    parser.add_argument(
-        "--dali_prefetch_queue_depth",
-        type=int,
-        default=4,
-        help="DALI reader prefetch queue depth",
-    )
     parser.add_argument(
         "--prefetch_batches",
         type=int,
-        default=4,
+        default=None,
         help="background batches to prefetch ahead of the training step",
     )
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
         "--sync_bn",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="use SyncBatchNorm across DDP ranks (usually unnecessary with large per-GPU batch)",
-    )
-    parser.add_argument(
-        "--samples_per_image",
-        type=int,
-        default=1,
-        help="random patches sampled per image each epoch (DALI train loader)",
     )
     parser.add_argument("--swanlab_project", type=str, default="rk3588-mobile-sr")
     parser.add_argument(
@@ -106,10 +113,21 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="disable SwanLab experiment logging",
     )
     parser.add_argument(
+        "--swanlab_run_id",
+        type=str,
+        default=None,
+        help="SwanLab run id for resume (default: load from checkpoint/swanlab_run.json)",
+    )
+    parser.add_argument(
         "--vis_samples",
         type=int,
         default=4,
         help="number of validation image panels to upload to SwanLab",
+    )
+    parser.add_argument(
+        "--no_data_preview",
+        action="store_true",
+        help="skip pre-training codec downsample / colorspace preview",
     )
     parser.add_argument(
         "--no_vis",
@@ -223,6 +241,21 @@ def setup_device(args: argparse.Namespace) -> torch.device:
     raise ValueError(f"Only CUDA devices are supported, got {device_name!r}")
 
 
+def _training_module_for_state_dict(model: nn.Module) -> nn.Module:
+    """Return the innermost trainable module for checkpoint load/save."""
+    from rk3588_mobile_sr.distributed.model import unwrap_model
+
+    inner = unwrap_model(model)
+    if hasattr(inner, "_orig_mod"):
+        return inner._orig_mod
+    return inner
+
+
+def training_module_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Serialize model weights without DDP/compile prefixes."""
+    return _training_module_for_state_dict(model).state_dict()
+
+
 def _normalize_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Strip DDP ``module.`` and ``torch.compile`` ``_orig_mod.`` prefixes."""
     normalized: dict[str, torch.Tensor] = {}
@@ -234,6 +267,28 @@ def _normalize_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torc
             name = name.removeprefix("module.")
         normalized[name] = value
     return normalized
+
+
+def load_training_checkpoint(
+    path: str | Path,
+    model: nn.Module,
+    optimizer: optim.Optimizer,
+    scheduler: optim.lr_scheduler.LRScheduler,
+    *,
+    train_accel: TrainAccel | None = None,
+    device: torch.device | None = None,
+) -> int:
+    """Restore model/optimizer/scheduler (and AMP scaler) from a stage checkpoint."""
+    raw = torch.load(path, map_location=device or "cpu", weights_only=False)
+    if not isinstance(raw, dict) or "state_dict" not in raw:
+        raise TypeError(f"Expected full training checkpoint in {path}")
+    unwrap = _training_module_for_state_dict(model)
+    unwrap.load_state_dict(_normalize_state_dict(raw["state_dict"]), strict=True)
+    optimizer.load_state_dict(raw["optimizer"])
+    scheduler.load_state_dict(raw["scheduler"])
+    if train_accel is not None and train_accel.scaler is not None and "scaler" in raw:
+        train_accel.scaler.load_state_dict(raw["scaler"])
+    return int(raw.get("step", 0))
 
 
 def build_model(
@@ -251,6 +306,7 @@ def build_model(
         num_blocks=args.num_blocks,
         num_conv_branches=args.num_conv_branches,
         inference_mode=inference_mode,
+        negative_slope=getattr(args, "negative_slope", 0.1),
     ).to(device)
     if weight_path is not None:
         raw = torch.load(weight_path, map_location=device, weights_only=False)
@@ -273,70 +329,40 @@ def build_loaders(
     distributed: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
-) -> tuple[DataLoader | object, DistributedSampler | object | None, DataLoader | None]:
-    """Build train/validation dataloaders."""
+) -> tuple[CodecTrainLoader, None, DataLoader | None]:
+    """Build canvas codec train/validation loaders."""
+    del device
     if distributed and dist.is_initialized():
         rank = dist.get_rank() if rank is None else rank
-        world_size = dist.get_world_size() if world_size is None else world_size
     else:
         rank = 0 if rank is None else rank
-        world_size = 1 if world_size is None else world_size
 
-    use_lmdb = bool(getattr(args, "lmdb_dir", None)) and train_aug
-    use_dali = getattr(args, "use_dali", False) and train_aug and not use_lmdb
-    if use_lmdb:
-        train_loader, train_sampler = build_lmdb_train_loader(
-            args.lmdb_dir,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            augment=args.lmdb_augment,
-            distributed=distributed,
-        )
-    elif use_dali:
-        if args.lr_dir is None:
-            raise ValueError("--lr_dir is required when --use_dali is enabled")
-        train_loader = build_dali_train_loader(
-            hr_dir=args.hr_dir,
-            lr_dir=args.lr_dir,
-            scale=args.scale,
-            patch_size=args.patch_size,
-            batch_size=args.batch_size,
-            device_id=rank,
-            shard_id=rank,
-            num_shards=world_size,
-            num_threads=args.dali_num_threads,
-            augment=True,
-            samples_per_image=getattr(args, "samples_per_image", 1),
-            min_steps_per_epoch=getattr(args, "dali_min_steps_per_epoch", 512),
-            prefetch_queue_depth=getattr(args, "dali_prefetch_queue_depth", 4),
-        )
-        train_sampler = None
-    else:
-        train_loader, train_sampler = build_dataloader(
-            hr_dir=args.hr_dir,
-            lr_dir=args.lr_dir,
-            scale=args.scale,
-            patch_size=args.patch_size,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            augment=train_aug,
-            distributed=distributed,
-        )
+    world_size = dist.get_world_size() if distributed and dist.is_initialized() else 1
+    settings = replace(data_settings_from_args(args), augment=train_aug)
+
+    train_bundle = build_codec_train_loader(
+        settings,
+        batch_size=args.batch_size,
+        rank=rank,
+        world_size=world_size,
+        seed=42 + rank,
+        device_id=rank if distributed else 0,
+    )
 
     val_loader = None
-    if args.val_hr_dir:
-        val_loader, _ = build_dataloader(
-            hr_dir=args.val_hr_dir,
-            lr_dir=args.val_lr_dir,
-            scale=args.scale,
-            patch_size=args.patch_size,
+    app_cfg = load_config(getattr(args, "config", None))
+    val_manifest = getattr(args, "val_manifest", None) or app_cfg.data.val_manifest
+    if val_manifest:
+        val_loader, _ = build_val_loader(
+            settings,
+            val_manifest=val_manifest,
             batch_size=val_bs,
-            num_workers=args.num_workers,
-            augment=False,
+            num_workers=2,
             distributed=distributed,
+            rank=rank,
         )
 
-    return train_loader, train_sampler, val_loader
+    return train_bundle, None, val_loader
 
 
 def find_free_port() -> int:

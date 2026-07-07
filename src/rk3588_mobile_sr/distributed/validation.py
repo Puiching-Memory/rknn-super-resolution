@@ -23,11 +23,13 @@ from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, log_validation_s
 class ValidationConfig:
     scale: int = 3
     extended: bool = True
-    compute_lpips: bool = False
+    compute_dists: bool = False
     log_images: bool = True
     deploy_check: bool = True
     vis_samples: int = 4
     vis_max_size: int = 768
+    colorspace: str = "rgb"
+    data_preview: bool = True
 
 
 @dataclass
@@ -91,7 +93,8 @@ class ValidationRunner:
                 self.ctx.rank,
                 self.ctx.world_size,
                 scale=self.config.scale,
-                compute_lpips=self.config.compute_lpips,
+                compute_dists=self.config.compute_dists,
+                colorspace=self.config.colorspace,
             )
         else:
             psnr = validate_ddp(
@@ -141,6 +144,7 @@ class ValidationRunner:
                         step=step,
                         num_samples=self.config.vis_samples,
                         max_size=self.config.vis_max_size,
+                        colorspace=self.config.colorspace,
                     )
                 except Exception as exc:
                     logger.warning("validation image upload failed: {}", exc)
@@ -149,8 +153,8 @@ class ValidationRunner:
             detail = ""
             if val_metrics is not None:
                 detail = f" | Y-PSNR={val_metrics.y_psnr:.2f} | SSIM={val_metrics.ssim:.4f}"
-                if val_metrics.lpips is not None:
-                    detail += f" | LPIPS={val_metrics.lpips:.4f}"
+                if val_metrics.dists is not None:
+                    detail += f" | DISTS={val_metrics.dists:.4f}"
             patience_note = ""
             if self.early_stop.enabled:
                 patience_note = (

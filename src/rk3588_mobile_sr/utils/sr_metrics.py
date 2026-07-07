@@ -12,8 +12,10 @@ from skimage.metrics import structural_similarity as ssim_metric
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-# First three DIV2K validation images (sorted by filename) for per-step tracking.
-DEFAULT_FIXED_VAL_INDICES: tuple[int, ...] = (0, 1, 2)
+from rk3588_mobile_sr.data.val_loader import FixedValDataset, iter_val_batches, select_val_vis_indices, val_spec_slug
+
+# UVG canvas samples (diverse sequences) tracked each validation step.
+DEFAULT_FIXED_VAL_TRACKS: int = 3
 
 
 @dataclass
@@ -28,8 +30,8 @@ class ValidationMetrics:
     psnr_p10: float
     psnr_p50: float
     psnr_p90: float
-    lpips: float | None = None
-    fixed_psnr: dict[int, float] = field(default_factory=dict)
+    dists: float | None = None
+    fixed_psnr: dict[str, float] = field(default_factory=dict)
 
     def to_log_dict(self) -> dict[str, float]:
         metrics: dict[str, float] = {
@@ -42,10 +44,10 @@ class ValidationMetrics:
             "val/psnr_p50": self.psnr_p50,
             "val/psnr_p90": self.psnr_p90,
         }
-        if self.lpips is not None:
-            metrics["val/lpips"] = self.lpips
-        for idx, psnr in self.fixed_psnr.items():
-            metrics[f"val/fixed_{idx}_psnr"] = psnr
+        if self.dists is not None:
+            metrics["val/dists"] = self.dists
+        for slug, psnr in self.fixed_psnr.items():
+            metrics[f"val/fixed_{slug}_psnr"] = psnr
         return metrics
 
 
@@ -127,7 +129,8 @@ def _aggregate_per_sample(
     records: list[tuple[int, float, float, float, float, float]],
     *,
     fixed_indices: tuple[int, ...],
-    has_lpips: bool,
+    specs: list | None,
+    has_dists: bool,
 ) -> ValidationMetrics:
     if not records:
         return ValidationMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -137,10 +140,18 @@ def _aggregate_per_sample(
     y_psnrs = np.array([row[2] for row in records], dtype=np.float64)
     ssims = np.array([row[3] for row in records], dtype=np.float64)
     l1s = np.array([row[4] for row in records], dtype=np.float64)
-    lpips_vals = np.array([row[5] for row in records], dtype=np.float64) if has_lpips else None
+    dists_vals = np.array([row[5] for row in records], dtype=np.float64) if has_dists else None
 
     by_index = {row[0]: row[1] for row in records}
-    fixed_psnr = {idx: by_index[idx] for idx in fixed_indices if idx in by_index}
+    fixed_psnr: dict[str, float] = {}
+    for idx in fixed_indices:
+        if idx not in by_index:
+            continue
+        if specs is not None and 0 <= idx < len(specs):
+            slug = val_spec_slug(specs[idx])
+        else:
+            slug = str(idx)
+        fixed_psnr[slug] = by_index[idx]
 
     return ValidationMetrics(
         psnr=float(psnrs.mean()),
@@ -151,7 +162,7 @@ def _aggregate_per_sample(
         psnr_p10=float(np.percentile(psnrs, 10)),
         psnr_p50=float(np.percentile(psnrs, 50)),
         psnr_p90=float(np.percentile(psnrs, 90)),
-        lpips=float(lpips_vals.mean()) if lpips_vals is not None else None,
+        dists=float(dists_vals.mean()) if dists_vals is not None else None,
         fixed_psnr=fixed_psnr,
     )
 
@@ -172,12 +183,23 @@ def validate_ddp_extended(
     world_size: int,
     *,
     scale: int = 3,
-    fixed_indices: tuple[int, ...] = DEFAULT_FIXED_VAL_INDICES,
-    compute_lpips: bool = False,
-    lpips_net: str = "alex",
+    fixed_indices: tuple[int, ...] | None = None,
+    fixed_tracks: int = DEFAULT_FIXED_VAL_TRACKS,
+    compute_dists: bool = False,
+    colorspace: str = "rgb",
 ) -> tuple[float, ValidationMetrics | None]:
     """Run full validation; all ranks receive mean PSNR, rank 0 also gets full metrics."""
-    from rk3588_mobile_sr.utils.lpips_metric import batch_lpips
+    from rk3588_mobile_sr.utils.pyiqa_metric import batch_perceptual_metric
+
+    dataset = val_loader.dataset
+    specs = dataset.specs if isinstance(dataset, FixedValDataset) else None
+    if fixed_indices is None and specs is not None:
+        fixed_indices = tuple(select_val_vis_indices(specs, fixed_tracks))
+    elif fixed_indices is None:
+        fixed_indices = ()
+
+    if colorspace == "yuv":
+        from rk3588_mobile_sr.data.yuv_utils import yuv444_to_rgb
 
     unwrap = getattr(model, "module", model)
     was_training = unwrap.training
@@ -189,29 +211,45 @@ def validate_ddp_extended(
     local_records: list[tuple[int, float, float, float, float, float]] = []
     offset = 0
 
-    for lr, hr in val_loader:
+    for lr, hr in iter_val_batches(val_loader):
         lr = lr.to(device, non_blocking=True)
         hr = hr.to(device, non_blocking=True)
         out = torch.clamp(unwrap(lr), 0.0, 255.0)
 
-        psnr_b = batch_psnr(out, hr, shave=shave)
-        y_psnr_b = batch_y_psnr(out, hr, shave=shave)
-        l1_b = batch_l1(out, hr, shave=shave)
-        lpips_b = (
-            batch_lpips(out, hr, device=device, net=lpips_net, shave=shave)
-            if compute_lpips
-            else None
-        )
+        if colorspace == "yuv":
+            out_rgb = yuv444_to_rgb(out)
+            hr_rgb = yuv444_to_rgb(hr)
+            psnr_b = batch_psnr(out_rgb, hr_rgb, shave=shave)
+            y_psnr_b = batch_psnr(out[:, :1], hr[:, :1], shave=shave)
+            l1_b = batch_l1(out, hr, shave=shave)
+            dists_b = (
+                batch_perceptual_metric(out_rgb, hr_rgb, device=device, shave=shave)
+                if compute_dists
+                else None
+            )
+        else:
+            psnr_b = batch_psnr(out, hr, shave=shave)
+            y_psnr_b = batch_y_psnr(out, hr, shave=shave)
+            l1_b = batch_l1(out, hr, shave=shave)
+            dists_b = (
+                batch_perceptual_metric(out, hr, device=device, shave=shave)
+                if compute_dists
+                else None
+            )
 
         batch_size = out.shape[0]
         batch_indices = sample_indices[offset : offset + batch_size]
         offset += batch_size
 
         for i, global_idx in enumerate(batch_indices):
-            sr_np = out[i].detach().float().cpu().permute(1, 2, 0).numpy()
-            hr_np = hr[i].detach().float().cpu().permute(1, 2, 0).numpy()
+            if colorspace == "yuv":
+                sr_np = yuv444_to_rgb(out[i].detach().float()).cpu().permute(1, 2, 0).numpy()
+                hr_np = yuv444_to_rgb(hr[i].detach().float()).cpu().permute(1, 2, 0).numpy()
+            else:
+                sr_np = out[i].detach().float().cpu().permute(1, 2, 0).numpy()
+                hr_np = hr[i].detach().float().cpu().permute(1, 2, 0).numpy()
             ssim_val = ssim_rgb(sr_np, hr_np, shave=shave)
-            lpips_val = float(lpips_b[i].item()) if lpips_b is not None else 0.0
+            dists_val = float(dists_b[i].item()) if dists_b is not None else 0.0
             local_records.append(
                 (
                     global_idx,
@@ -219,7 +257,7 @@ def validate_ddp_extended(
                     float(y_psnr_b[i].item()),
                     ssim_val,
                     float(l1_b[i].item()),
-                    lpips_val,
+                    dists_val,
                 )
             )
 
@@ -244,7 +282,8 @@ def validate_ddp_extended(
         metrics = _aggregate_per_sample(
             merged,
             fixed_indices=fixed_indices,
-            has_lpips=compute_lpips,
+            specs=specs,
+            has_dists=compute_dists,
         )
         psnr = metrics.psnr
 

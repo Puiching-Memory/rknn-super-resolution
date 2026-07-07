@@ -86,9 +86,9 @@ flowchart LR
 | LR Patch   | 160×160                                       |
 | λ_dct      | 0.02                                          |
 | λ_kd       | 0.03                                          |
-| Teacher    | Real-ESRGAN-x4 / EDSR-baseline ×3（快速验证） |
+| Teacher    | MambaIRv2Light ×3（`mambairv2_lightSR_x3.pth`） |
 
-> 说明：本阶段先不追求 MambaIRv2Light；用 Real-ESRGAN 或 EDSR-baseline 做教师即可验证 pipeline。若后续精度不够，再替换为 MambaIRv2Light。
+> 教师权重来自 [MambaIR v1.0 release](https://github.com/csguoh/MambaIR/releases/tag/v1.0)（`mambairv2_lightSR_x3.pth`）。首次安装 `mamba-ssm` 会从源码编译，同样需要能访问 PyPI/GitHub（必要时开代理后 `uv sync`）。
 
 #### DCT Loss
 
@@ -227,7 +227,8 @@ rk3588_mobile_sr/
 
 ## 8. 下一步建议
 
-1. **确认教师模型**：是否用 Real-ESRGAN / EDSR-baseline，还是直接上 MambaIRv2Light？
+1. **教师权重**：`uv run python scripts/download_mambairv2_teacher.py`（需 GitHub 访问；国内建议开代理）
+2. **同步上游结构**（可选）：`./scripts/vendor_mambairv2_light.sh`（需 `git clone` 访问 GitHub）
 2. **确认 QAT 工具**：PyTorch FX QAT（论文路线）还是 `torch.ao.quantization` eager mode（更成熟）？
 3. **确认上采样算子**：PixelShuffle 还是 Depth2Space，以及 RKNN 版本是否支持。
 4. **立即可以产出**：`mobileone_sr.py`、`mobileone_block.py`、`train_stage1.py`、`train_stage3_qat.py` 的代码骨架。

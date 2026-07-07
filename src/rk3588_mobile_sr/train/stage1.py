@@ -15,11 +15,16 @@ from rk3588_mobile_sr.distributed.validation import EarlyStopState, ValidationCo
 from rk3588_mobile_sr.train.session import TrainSession
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.run_logger import logger
+from rk3588_mobile_sr.utils.swanlab_logging import get_swanlab_run_id
 from rk3588_mobile_sr.utils.train_framework import (
     add_common_args,
     build_model,
     build_train_accel,
+    load_training_checkpoint,
+    resolve_colorspace,
+    resolve_prefetch_batches,
     save_checkpoint_dict,
+    training_module_state_dict,
 )
 
 
@@ -33,6 +38,12 @@ def parse_args():
     parser.add_argument("--early_stop_patience", type=int, default=10)
     parser.add_argument("--early_stop_min_delta", type=float, default=0.01)
     parser.add_argument("--no_early_stop", action="store_true")
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="resume from a full stage1 checkpoint (best.pth / step_*.pth)",
+    )
     return parser.parse_args()
 
 
@@ -46,10 +57,13 @@ def _full_checkpoint(
 ) -> dict:
     ckpt = {
         "step": step,
-        "state_dict": model.module.state_dict(),
+        "state_dict": training_module_state_dict(model),
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict(),
     }
+    run_id = get_swanlab_run_id()
+    if run_id:
+        ckpt["swanlab_run_id"] = run_id
     if scaler is not None:
         ckpt["scaler"] = scaler.state_dict()
     return ckpt
@@ -80,6 +94,19 @@ def main():
         criterion = nn.L1Loss()
         optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
         scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.max_steps)
+
+        global_step = 0
+        if args.resume:
+            global_step = load_training_checkpoint(
+                args.resume,
+                model,
+                optimizer,
+                scheduler,
+                train_accel=train_accel,
+                device=ctx.device,
+            )
+            if ctx.is_main:
+                logger.info("resumed from {} at step {}", args.resume, global_step)
 
         def loss_fn(m, lr, hr):
             return criterion(m(lr), hr)
@@ -123,7 +150,7 @@ def main():
             log_every=args.log_every,
             val_every=args.val_every,
             save_every=args.save_every,
-            prefetch_batches=args.prefetch_batches,
+            prefetch_batches=resolve_prefetch_batches(args),
             val_scale=args.scale,
         )
         val_config = ValidationConfig(
@@ -133,6 +160,8 @@ def main():
             deploy_check=not args.no_model_diag,
             vis_samples=args.vis_samples,
             vis_max_size=args.vis_max_size,
+            colorspace=resolve_colorspace(args),
+            data_preview=not args.no_data_preview,
         )
 
         try:
@@ -146,6 +175,7 @@ def main():
                 validation_config=val_config,
                 early_stop=early_stop,
                 model_diag=not args.no_model_diag,
+                global_step=global_step,
             )
         finally:
             session.finalize()

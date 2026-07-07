@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 """Download MambaIRv2Light ×3 teacher weights for Stage 2 distillation."""
 
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
-import torch
 from torch.hub import download_url_to_file
 
 RELEASE_URL = (
@@ -39,8 +38,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def _apply_proxy(proxy: str | None) -> None:
-    import os
-
     if proxy is None:
         proxy = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
     if not proxy:

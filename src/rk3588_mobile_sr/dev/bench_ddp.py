@@ -1,4 +1,4 @@
-"""Quick multi-GPU training step benchmark via torchrun."""
+"""Quick multi-GPU canvas codec training benchmark via torchrun."""
 
 from __future__ import annotations
 
@@ -21,13 +21,11 @@ from rk3588_mobile_sr.utils.train_framework import (
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hr_dir", default="data/DIV2K_train_HR")
-    parser.add_argument("--lr_dir", default="data/DIV2K_train_LR_bicubic/X3")
-    parser.add_argument("--patch_size", type=int, default=128)
+    parser.add_argument("--codec_manifest", default="data/codec_cache/manifest.jsonl")
+    parser.add_argument("--decode", default="auto", choices=["auto", "dali", "torchcodec"])
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--use_dali", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
     rank = setup_ddp()
@@ -35,20 +33,17 @@ def main() -> None:
     device = torch.device(f"cuda:{rank}")
 
     ns = argparse.Namespace(
-        hr_dir=args.hr_dir,
-        lr_dir=args.lr_dir,
-        val_hr_dir=None,
-        val_lr_dir=None,
+        config=None,
+        codec_manifest=args.codec_manifest,
+        decode=args.decode,
+        val_manifest=None,
         scale=3,
         num_channels=32,
         num_blocks=8,
         num_conv_branches=4,
-        patch_size=args.patch_size,
+        negative_slope=0.1,
+        colorspace="yuv",
         batch_size=args.batch_size,
-        num_workers=4,
-        use_dali=args.use_dali,
-        dali_num_threads=4,
-        samples_per_image=1,
     )
 
     model = build_model(ns, device)
@@ -65,16 +60,17 @@ def main() -> None:
     def run_steps(n: int) -> float:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        for count, (lr, hr) in enumerate(train_loader, start=1):
-            lr = lr.to(device, non_blocking=True) if lr.device != device else lr
-            hr = hr.to(device, non_blocking=True) if hr.device != device else hr
+        data_iter = iter(train_loader.dataloader)
+        for _ in range(n):
+            lr, hr = next(data_iter)
+            if lr.device != device:
+                lr = lr.to(device, non_blocking=True)
+                hr = hr.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             out = model(lr)
             loss = criterion(out, hr)
             loss.backward()
             optimizer.step()
-            if count >= n:
-                break
         torch.cuda.synchronize()
         dist.barrier()
         return time.perf_counter() - t0
@@ -87,13 +83,14 @@ def main() -> None:
     img_per_s = args.steps * global_batch / elapsed
 
     if rank == 0:
-        backend = "DALI" if args.use_dali else "PyTorch"
         print(
-            f"[{backend}] {world_size} GPUs x batch {args.batch_size} | "
+            f"[codec canvas] {world_size} GPUs x batch {args.batch_size} | "
+            f"decode={args.decode} | "
             f"{args.steps} steps in {elapsed:.2f}s | "
             f"{args.steps / elapsed:.2f} step/s | {img_per_s:.0f} img/s"
         )
 
+    train_loader.close()
     cleanup_ddp()
 
 

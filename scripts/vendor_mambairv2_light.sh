@@ -22,7 +22,7 @@ fi
 git clone --depth 1 "${UPSTREAM}" "${TMP_DIR}"
 test -f "${TMP_DIR}/${SRC_REL}"
 
-python3 - "${TMP_DIR}/${SRC_REL}" "${DST}" <<'PY'
+uv run python - "${TMP_DIR}/${SRC_REL}" "${DST}" <<'PY'
 import pathlib
 import sys
 

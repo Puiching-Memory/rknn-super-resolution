@@ -49,7 +49,7 @@ def test_mobileone_block_train_forward():
 
 def test_mobileone_block_deploy_forward():
     """MobileOneBlock should work after switching to deploy/inference mode."""
-    block = MobileOneBlock(8, 8, num_conv_branches=2, inference_mode=False)
+    block = MobileOneBlock(8, 8, num_conv_branches=2, inference_mode=False, negative_slope=0.1)
     block.eval()
 
     x = torch.randn(1, 8, 16, 16)

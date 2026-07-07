@@ -18,6 +18,8 @@ from rk3588_mobile_sr.utils.train_framework import (
     build_model,
     build_train_accel,
     make_optimizer,
+    resolve_colorspace,
+    resolve_prefetch_batches,
 )
 
 
@@ -45,8 +47,9 @@ def parse_args():
     )
     parser.add_argument("--stage1_weight", type=str, required=True)
     parser.add_argument("--lambda_dct", type=float, default=0.02)
+    parser.add_argument("--lambda_dists", type=float, default=0.05)
     parser.add_argument("--lambda_kd", type=float, default=0.03)
-    parser.add_argument("--no_val_lpips", action="store_true")
+    parser.add_argument("--no_val_dists", action="store_true")
     return parser.parse_args()
 
 
@@ -79,13 +82,23 @@ def main():
             device=str(ctx.device),
             compile_model=False,
         )
-        stage2_loss = Stage2Loss(lambda_dct=args.lambda_dct, lambda_kd=args.lambda_kd)
+        stage2_loss = Stage2Loss(
+            lambda_dct=args.lambda_dct,
+            lambda_dists=args.lambda_dists,
+            lambda_kd=args.lambda_kd,
+        )
         loaders = session.build_loaders()
+        colorspace = resolve_colorspace(args)
 
         def loss_fn(m, lr, hr):
             pred = m(lr)
-            tea = teacher(lr)
-            out = stage2_loss(pred, hr, tea)
+            if colorspace == "yuv":
+                from rk3588_mobile_sr.data.yuv_utils import yuv444_to_rgb
+
+                tea = teacher(yuv444_to_rgb(lr))
+            else:
+                tea = teacher(lr)
+            out = stage2_loss(pred, hr, tea, colorspace=colorspace)
             return out.total, out.log_dict()
 
         optimizer = make_optimizer(unwrap_model(model), args.lr)
@@ -102,17 +115,19 @@ def main():
             log_every=args.log_every,
             val_every=args.val_every,
             save_every=args.save_every,
-            prefetch_batches=args.prefetch_batches,
+            prefetch_batches=resolve_prefetch_batches(args),
             val_scale=args.scale,
         )
         val_config = ValidationConfig(
             scale=args.scale,
             extended=True,
-            compute_lpips=not args.no_val_lpips,
+            compute_dists=not args.no_val_dists,
             log_images=not args.no_vis,
             deploy_check=not args.no_model_diag,
             vis_samples=args.vis_samples,
             vis_max_size=args.vis_max_size,
+            colorspace=colorspace,
+            data_preview=not args.no_data_preview,
         )
 
         try:

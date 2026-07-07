@@ -11,7 +11,6 @@ dependencies = [
     "nvidia-dali-cuda130>=2.1.0",
     "lmdb>=1.4",
     "loguru>=0.7",
-    "lpips>=0.1.4",
     "pillow>=10.0",
     "pyyaml>=6.0",
     "rich>=13.0",
@@ -22,11 +21,14 @@ dependencies = [
     "traceml-ai>=0.3.1",
     "typer>=0.12.0",
     "einops>=0.8.0",
+    "torchcodec>=0.14",
     "causal-conv1d>=1.4.0",
     "mamba-ssm>=2.2.0",
     "pre-commit>=3.7",
     "pytest>=8.0",
     "ruff>=0.6.0",
+    "kornia>=0.8.3",
+    "pyiqa>=0.1.15.post2",
 ]
 
 # RKNN conversion is typically done in a separate environment because
@@ -38,12 +40,19 @@ rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
 rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
 rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
 rk3588-train-stage3-qat = "rk3588_mobile_sr.train.stage3_qat:main"
-rk3588-build-div2k-lmdb = "rk3588_mobile_sr.data.div2k_lmdb:main"
+rk3588-build-train-manifest = "rk3588_mobile_sr.data.manifest_cli:build_train_manifest"
+rk3588-build-val-codec-fixed = "rk3588_mobile_sr.data.manifest_cli:build_val_codec_fixed"
+rk3588-build-codec-cache = "rk3588_mobile_sr.data.codec_build:main"
 rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
 rk3588-relu-audit = "rk3588_mobile_sr.deploy.relu_audit:main"
 rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
+rk3588-profile-stage1 = "rk3588_mobile_sr.dev.profile_stage1:main"
+rk3588-bench-dataloader = "rk3588_mobile_sr.dev.bench_dataloader:main"
+rk3588-bench-ddp = "rk3588_mobile_sr.dev.bench_ddp:main"
+rk3588-download-teacher = "rk3588_mobile_sr.dev.download_teacher:main"
+rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:main"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu130" }

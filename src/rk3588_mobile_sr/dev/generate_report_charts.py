@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generate report chart PNGs under docs/report_assets/."""
 
 from __future__ import annotations
@@ -12,7 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 METRICS_JSON = ROOT / "stage1_metrics.json"
 OUT_DIR = ROOT / "docs" / "report_assets"
 

@@ -15,6 +15,7 @@ class MobileOneBlock(nn.Module):
         stride: int = 1,
         num_conv_branches: int = 4,
         inference_mode: bool = False,
+        negative_slope: float = 0.1,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -22,6 +23,7 @@ class MobileOneBlock(nn.Module):
         self.stride = stride
         self.num_conv_branches = num_conv_branches
         self.inference_mode = inference_mode
+        self.negative_slope = negative_slope
 
         self.kernel_size = 3
         self.padding = 1
@@ -69,11 +71,11 @@ class MobileOneBlock(nn.Module):
                 nn.BatchNorm2d(in_channels) if out_channels == in_channels and stride == 1 else None
             )
 
-            self.relu = nn.ReLU(inplace=True)
+            self.relu = nn.LeakyReLU(negative_slope, inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.inference_mode:
-            return F.relu(self.reparam_conv(x))
+            return F.leaky_relu(self.reparam_conv(x), negative_slope=self.negative_slope, inplace=True)
 
         out = 0.0
         for branch in self.conv_branches:

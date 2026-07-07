@@ -24,7 +24,7 @@ from rk3588_mobile_sr.utils.model_diagnostics import (
     collect_training_diagnostics,
 )
 from rk3588_mobile_sr.utils.run_logger import logger
-from rk3588_mobile_sr.utils.swanlab_logging import log_metrics
+from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, run_training_data_preview
 from rk3588_mobile_sr.utils.traceml_profiling import trace_training_step
 from rk3588_mobile_sr.utils.train_framework import TrainAccel, amp_autocast, run_backward
 
@@ -121,6 +121,24 @@ class StepTrainer:
             self.save_dir.mkdir(parents=True, exist_ok=True)
         self.ctx.barrier()
         self._log_plan()
+
+        if (
+            self.ctx.is_main
+            and self.val_loader is not None
+            and self.validation_config.data_preview
+        ):
+            try:
+                run_training_data_preview(
+                    self.val_loader,
+                    colorspace=self.validation_config.colorspace,
+                    num_samples=self.validation_config.vis_samples,
+                    max_size=self.validation_config.vis_max_size,
+                    save_dir=self.save_dir,
+                    step=self.global_step,
+                )
+            except Exception as exc:
+                logger.warning("data preview failed: {}", exc)
+        self.ctx.barrier()
 
         val_runner = ValidationRunner(
             ctx=self.ctx,

@@ -1,35 +1,43 @@
-# Project Guidelines
+# Agent Guidelines
 
-## Python Environment
+本文件只记录**方法论与不变量**。命令、目录树、训练参数等事实性内容以 [README.md](README.md)、[pyproject.toml](pyproject.toml)、[config/mobileone_sr_x3.yaml](src/rk3588_mobile_sr/config/mobileone_sr_x3.yaml) 为准；改代码时去读源码，不要在这里双向维护副本。
 
-This project uses `uv` as the default Python package and environment manager. Do not use `pip` directly unless the user explicitly asks for it.
+## 信息从哪来
 
-- Python version: `3.12.*` (defined in `pyproject.toml`).
-- GPU stack: CUDA 13.0 (`cu130`) PyTorch wheels only; CPU-only PyTorch is not supported.
-- Lock file: `uv.lock` is committed; prefer `uv sync` to keep it consistent.
+- **怎么跑**：`scripts/*.sh`（运维入口）→ 内部 `uv run` + `torchrun -m ...`；完整 CLI 列表见 `pyproject.toml` `[project.scripts]`。
+- **默认配置**：`config/mobileone_sr_x3.yaml`；CLI `--config` / 参数可覆盖。
+- **架构与流程**：README；实现细节在 `src/rk3588_mobile_sr/` 对应模块。
 
-### Install
+## 环境与工具链
 
-```bash
-uv sync
-```
+- 只用 **`uv`** 管理依赖（`uv sync`）；除非用户明确要求，不用 `pip`。
+- 训练栈绑定 **CUDA 13.0 / cu130**；RKNN 工具链与主环境 torch 版本冲突，**隔离在 `.venv-rknn`**，不并入主依赖。
+- 校验改动：`uv run pytest`、`uv run ruff check src tests`（配置见 `pyproject.toml`）。
 
-For development (lint, tests, pre-commit):
+## 代码放哪、怎么改
 
-```bash
-uv sync
-```
+- 可安装代码一律在 **`src/rk3588_mobile_sr/`**（src layout）。
+- **`scripts/` 只放 bash**；Python 工具进包内（如 `dev/`）并注册 `[project.scripts]`，不要复活 `scripts/*.py`。
+- 先读周边模块再写：命名、类型、抽象层级与现有文件保持一致；改动范围限于任务所需，不顺手重构无关代码。
+- 行为有实质变化时再补测试；不测显然成立的事。
+- 不主动改 README / docs、不主动 `git commit`，除非用户要求或对外接口确实变了。
 
-PyTorch and DALI wheel sources are pinned in `pyproject.toml` under `[tool.uv.index]` and `[tool.uv.sources]`.
+## 架构不变量（违反会出真 bug）
 
-### Project Layout
+改训练、分布式、数据、可视化相关代码时，默认这些约束仍然成立：
 
-The installable package lives under `src/rk3588_mobile_sr/` (src layout). Entry points:
+1. **Step-based DDP**：循环在 `train/loop.py`；阶段脚本只组装 hook 与配置，不另起一套训练循环。
+2. **rank 0 独占段**：日志、SwanLab、checkpoint、验证图像等只能在 collective **完成之后**、经 `distributed/sync.py` `rank0_section` 执行；禁止让非 0 rank 在 broadcast 前空等。
+3. **数据契约**：离线 codec cache + 在线 GPU 解码；分辨率与 deploy 对齐（LR 360×640 canvas，HR 1080×1920）。解码后端与 manifest 格式以 `data/train_loader.py`、`data/codec_index.py` 为准。
+4. **色彩空间**：默认在 **YUV444** 张量上训练；RGB 仅用于可视化与部分指标，经 `data/yuv_utils.py` 转换。排查色差时先区分 codec/模型误差与 YUV 往返误差（见 `utils/swanlab_logging.py` data preview）。
+5. **部署图**：推理前 `switch_to_deploy()`；导出/量化逻辑在 `deploy/`，不与训练循环缠在一起。
 
-- `rk3588-mobile-sr` — unified CLI (`train`, `eval`, `export-onnx`, `convert-rknn`)
-- Legacy aliases: `rk3588-train-stage1`, `rk3588-train-stage2`, etc.
+## 非显而易见、但值得记住
 
-### Notes
+- `torchrun` 须用 **`-m rk3588_mobile_sr.train.stage*`**（或 Typer 的 `-m rk3588_mobile_sr train stage*`），不能把 console script 名当文件路径。
+- 勿 `export SWANLAB_EXPERIMENT`（SDK 会误解析）；用 `--swanlab_experiment`。`scripts/_common.sh` 已处理 `NO_PROXY` 等环境。
+- NVDEC 不可用时 `decode` 降级 TorchCodec，不是代码 bug，先查驱动 capabilities。
 
-- Training, evaluation, and ONNX export require an NVIDIA GPU with a compatible driver.
-- RKNN conversion (`rknn-toolkit2`) has its own torch/onnx version constraints. Keep it in a separate environment and install it manually when needed.
+## SwanLab
+
+写追踪代码或查实验数据时，读 `.cursor/skills/swanlab-skill/`；项目内集成点在 `utils/swanlab_logging.py`。

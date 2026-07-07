@@ -18,15 +18,27 @@ class ModelConfig:
     num_channels: int = 32
     num_blocks: int = 8
     num_conv_branches: int = 4
+    negative_slope: float = 0.1
 
 
 @dataclass
 class DataConfig:
-    train_hr_dir: str = "data/DIV2K_train_HR"
-    train_lr_dir: str = "data/DIV2K_train_LR_bicubic/X3"
-    val_hr_dir: str = "data/DIV2K_valid_HR"
-    val_lr_dir: str = "data/DIV2K_valid_LR_bicubic/X3"
-    num_workers: int = 4
+    codec_manifest: str = "data/codec_cache/manifest.jsonl"
+    val_manifest: str = "data/sources/manifests/val_fixed.jsonl"
+    lr_size: tuple[int, int] = (360, 640)
+    hr_size: tuple[int, int] = (1080, 1920)
+    colorspace: str = "yuv"
+    nv12_simulate: bool = True
+    augment: bool = True
+    decode: str = "auto"
+    dali_num_threads: int = 4
+    dali_initial_fill: int = 32
+    prefetch_batches: int = 4
+    augment_rot90: bool = False
+    augment_lr_blur: bool = False
+    augment_lr_motion_blur: bool = False
+    augment_lr_noise: bool = False
+    augment_lr_jpeg: bool = False
 
 
 @dataclass
@@ -51,6 +63,7 @@ class Stage2Config:
     early_stop_min_delta: float = 0.005
     lr: float = 3e-5
     lambda_dct: float = 0.02
+    lambda_dists: float = 0.05
     lambda_kd: float = 0.03
     teacher_arch: str = "mambairv2_light"
     teacher_weight: str = "checkpoints/teacher/mambairv2_lightSR_x3.pth"
@@ -100,7 +113,12 @@ def _merge_dataclass(cls: type, data: dict[str, Any] | None) -> Any:
     if not data:
         return cls()
     valid = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-    return cls(**{k: v for k, v in data.items() if k in valid})
+    kwargs = {k: v for k, v in data.items() if k in valid}
+    if cls is DataConfig and "lr_size" in kwargs:
+        kwargs["lr_size"] = tuple(kwargs["lr_size"])
+    if cls is DataConfig and "hr_size" in kwargs:
+        kwargs["hr_size"] = tuple(kwargs["hr_size"])
+    return cls(**kwargs)
 
 
 def load_config(path: Path | str | None = None) -> AppConfig:
