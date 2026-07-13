@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, DistributedSampler
@@ -12,16 +14,8 @@ from torch.utils.data import DataLoader, Dataset, DistributedSampler
 from rk3588_mobile_sr.data.manifest import load_manifest, load_val_manifest
 from rk3588_mobile_sr.data.train_loader import TrainDataSettings
 from rk3588_mobile_sr.data.types import SourceRecord, ValSampleMeta, ValSampleSpec
-from rk3588_mobile_sr.data.yuv_video import YuvVideoSource
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_model_colorspace
-
-_TORCHCODEC_AVAILABLE = False
-try:
-    from torchcodec.decoders import VideoDecoder
-
-    _TORCHCODEC_AVAILABLE = True
-except ImportError:
-    VideoDecoder = None  # type: ignore[misc, assignment]
+from rk3588_mobile_sr.data.yuv_video import YuvVideoSource, read_yuv420_frame
 
 
 def val_sequence_name(spec: ValSampleSpec) -> str:
@@ -125,7 +119,7 @@ def codec_clip_paths_for_spec(
     codec_records: dict[str, SourceRecord],
     project_root: Path,
 ) -> tuple[Path, Path] | None:
-    """Resolve on-disk LR codec and HR mezzanine MP4 paths for a val sample."""
+    """Resolve on-disk LR codec and HR lossless MP4 paths for a val sample."""
     clip = resolve_codec_clip_for_spec(spec, codec_records)
     if clip is None:
         return None
@@ -156,15 +150,29 @@ def _decode_codec_clip_rgb_pair(
     lr_size: tuple[int, int],
     hr_size: tuple[int, int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode LR from the codec mp4 (ffmpeg) and HR from the *raw source YUV*.
+
+    HR supervision is read directly from the original YUV420p file so the
+    validation target is bit-exact (no mezzanine re-encode). LR is decoded from
+    the offline codec clip via an ffmpeg subprocess (torchcodec removed).
+    """
     lr_path = (project_root / record.path).resolve()
-    hr_mp4 = record.extra.get("hr_mp4_path")
-    if not hr_mp4:
-        raise ValueError(f"codec_clip {record.id} missing hr_mp4_path")
-    hr_path = (project_root / hr_mp4).resolve()
+    source_path = record.extra.get("source_path")
+    if not source_path:
+        raise ValueError(f"codec_clip {record.id} missing source_path for HR YUV")
+    hr_yuv_path = (project_root / source_path).resolve()
     clip_origin = int(record.extra.get("clip_start", clip_start))
     rel = max(0, min(frame_index - clip_origin, record.frames - 1))
-    lr_rgb = _decode_mp4_frame(lr_path, rel)
-    hr_rgb = _decode_mp4_frame(hr_path, clip_origin + rel)
+    lr_w = int(record.extra.get("lr_width", lr_size[1]))
+    lr_h = int(record.extra.get("lr_height", lr_size[0]))
+    lr_rgb = _decode_mp4_frame_ffmpeg(lr_path, rel, width=lr_w, height=lr_h)
+    hr_abs_frame = clip_origin + rel
+    hr_rgb = read_yuv420_frame(
+        hr_yuv_path,
+        width=record.width,
+        height=record.height,
+        frame_index=hr_abs_frame,
+    )
     return (
         _resize_canvas_rgb(lr_rgb, size=lr_size),
         _resize_canvas_rgb(hr_rgb, size=hr_size),
@@ -188,14 +196,46 @@ def _collate_pairs(batch: list[tuple[torch.Tensor, torch.Tensor]]) -> tuple[torc
     return lr, hr
 
 
-def _decode_mp4_frame(path: Path, frame_index: int) -> torch.Tensor:
-    if VideoDecoder is None:
-        raise RuntimeError("torchcodec required for validation decode")
-    dec = VideoDecoder(str(path), device="cpu", num_ffmpeg_threads=0)
-    frame = dec.get_frames_at([frame_index]).data[0].float()
-    if frame.max() <= 1.0:
-        frame = frame * 255.0
-    return frame
+def _decode_mp4_frame_ffmpeg(
+    path: Path,
+    frame_index: int,
+    *,
+    width: int,
+    height: int,
+) -> torch.Tensor:
+    """Decode a single RGB frame from an mp4 via an ffmpeg subprocess."""
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(path),
+        "-vf",
+        f"select=eq(n\\,{frame_index})",
+        "-vsync",
+        "0",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(f"ffmpeg decode failed for {path}@{frame_index}: {err}")
+    arr = np.frombuffer(proc.stdout, dtype=np.uint8)
+    expected = width * height * 3
+    if arr.size != expected:
+        raise RuntimeError(
+            f"decoded frame size {arr.size} != {expected} ({width}x{height}x3) "
+            f"for {path}@{frame_index}"
+        )
+    rgb = arr.reshape(height, width, 3)
+    return torch.from_numpy(rgb).permute(2, 0, 1).contiguous().float()
 
 
 class FixedValDataset(Dataset):

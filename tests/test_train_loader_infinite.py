@@ -1,35 +1,33 @@
-"""Training loader smoke tests."""
+"""Training loader smoke tests.
+
+The torchcodec CPU fallback has been removed; only DALI (NVDEC) is supported.
+Smoke tests that need an actual iterator are gated on CUDA + libnvcuvid.
+"""
 
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 import pytest
+import torch
 
-from rk3588_mobile_sr.data.train_loader import TrainDataSettings, build_codec_train_loader, resolve_decode_backend
-from tests.test_codec_offline import _build_fixture
+from rk3588_mobile_sr.data.train_loader import (
+    nvidia_cuvid_available,
+    resolve_decode_backend,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
 
 
-def test_infinite_train_loader(tmp_path: Path):
-    cache_manifest = _build_fixture(tmp_path, lr_size=(24, 32))
-    settings = TrainDataSettings(
-        codec_manifest=str(cache_manifest),
-        lr_size=(24, 32),
-        hr_size=(72, 96),
-        colorspace="rgb",
-        augment=False,
-        decode="torchcodec",
-        project_root=str(tmp_path),
-    )
-    bundle = build_codec_train_loader(settings, batch_size=2, seed=0, device_id=0)
-    batches = [next(bundle.dataloader) for _ in range(3)]
-    assert all(lr.shape[0] == 2 for lr, _ in batches)
-    bundle.close()
+def test_resolve_decode_backend_rejects_torchcodec():
+    # torchcodec fallback removed -> explicit torchcodec is no longer accepted.
+    with pytest.raises(ValueError):
+        resolve_decode_backend("torchcodec")
 
 
-def test_resolve_decode_backend_auto():
-    backend = resolve_decode_backend("auto")
-    assert backend in ("dali", "torchcodec")
+def test_resolve_decode_backend_auto_requires_nvdec():
+    if torch.cuda.is_available() and nvidia_cuvid_available():
+        assert resolve_decode_backend("auto") == "dali"
+    else:
+        with pytest.raises(RuntimeError):
+            resolve_decode_backend("auto")

@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
+from rk3588_mobile_sr.data.types import ValSampleMeta
 from rk3588_mobile_sr.data.val_loader import (
     FixedValDataset,
     iter_val_batches,
@@ -25,7 +26,6 @@ from rk3588_mobile_sr.data.val_loader import (
     val_sample_meta,
 )
 from rk3588_mobile_sr.data.yuv_utils import colorspace_roundtrip_rgb
-from rk3588_mobile_sr.data.types import ValSampleMeta
 from rk3588_mobile_sr.utils.run_logger import logger
 
 _active = False
@@ -628,7 +628,7 @@ def _append_codec_clip_videos(
     if hr_video is not None and hr_video.is_file():
         payload[f"{key_prefix}/{slug}/hr_clip"] = swanlab.Video(
             str(hr_video),
-            caption=f"{caption}\nHR mezzanine clip",
+            caption=f"{caption}\nHR lossless clip",
         )
 
 

@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class SourceRow(BaseModel):
-    """One train manifest row (yuv_video or image)."""
+    """One train manifest row (raw YUV video only; still-image sources removed)."""
 
     id: str
-    type: Literal["yuv_video", "image"]
+    type: Literal["yuv_video"] = "yuv_video"
     path: str
     weight: float = 1.0
     width: int

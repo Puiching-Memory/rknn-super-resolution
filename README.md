@@ -95,10 +95,10 @@ uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage1/best.pth ...
 
 ## 数据准备
 
-训练数据由 **manifest JSONL** 描述异构源（UVG 1080p YUV + DIV2K HR 等）。离线 LR codec cache 由 **Snakemake** 编排（代码在 `src/rk3588_mobile_sr/data_pipeline/`，DAG 在 `scripts/pipeline/`），训练侧仍读 `data/codec_cache/manifest.jsonl`。
+训练数据由 **manifest JSONL** 描述原生视频源（UVG 1080p YUV420p）。离线 LR codec cache 由 **Snakemake** 编排（代码在 `src/rk3588_mobile_sr/data_pipeline/`，DAG 在 `scripts/pipeline/`），训练侧读 `data/codec_cache/manifest.jsonl`。
 
 ```bash
-# 一键：发现源 → 写 manifest → Snakemake 构建 codec cache
+# 一键：发现源 -> 写 manifest -> Snakemake 构建 codec cache
 ./scripts/build_data.sh
 
 # 或分步：
@@ -111,7 +111,7 @@ uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest \
   --train-manifest data/sources/manifests/train.jsonl \
   --output data/codec_cache/manifest.jsonl \
   --cache-dir data/codec_cache \
-  --mezzanine-dir data/mezzanine
+  --hr-dir data/hr_lossless
 ```
 
 `build_data.sh` 支持环境变量：`WORKERS`、`CLIPS_PER_VIDEO`、`BITRATES`；干跑传 `./scripts/build_data.sh -- -n`。
@@ -121,26 +121,25 @@ uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest \
 ```
 data/
 ├── sources/manifests/
-│   ├── train.jsonl              # UVG + DIV2K 源
+│   ├── train.jsonl              # UVG YUV 源
 │   └── val_fixed.jsonl          # 固定 UVG 验证行
 ├── codec_cache/manifest.jsonl   # 离线 LR clip 索引（训练读取）
-├── codec_cache/*.mp4            # 预编码 LR clips
-├── mezzanine/*_hr.mp4           # HR mezzanine（DIV2K 为 8 帧 crop 槽位）
-├── scaled_cache/                # Snakemake 中间产物（rgb24，可删后重建）
+├── codec_cache/*.mp4            # 预编码 LR clips（退化+压缩）
+├── hr_lossless/*_s{clip}_hr.mp4 # 每 clip 的无损 H.264 HR（CRF 0，监督标签）
 └── UVG_raw/yuv_1080p/           # 原始 1080p YUV420 序列
 
 scripts/pipeline/
-├── Snakefile                    # mezzanine → scale → lr_encode → manifest
-├── config.yaml                  # codecs / bitrates / clips 等
-└── ffmpeg/                      # 编码 shell 脚本
+├── Snakefile                    # discover -> hr_clip -> degrade_and_encode -> manifest
+├── config.yaml                  # codecs / bitrates / gop_candidates / clips 等
+└── ffmpeg/                      # hr_clip.sh（无损 HR 提取）
 ```
 
 默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线 codec cache + GPU 解码**：
 
-1. Snakemake 预编码 LR clip 与 HR mezzanine MP4，并写出 `codec_cache/manifest.jsonl`
-2. 训练时 `decode=auto` 优先 DALI NVDEC，无 `libnvcuvid` 时降级 TorchCodec
+1. Snakemake 从原始 YUV 提取每 clip 的 **无损 H.264 HR**（CRF 0，监督标签与源 bit-exact），再对 HR 做 **混合下采样核 + 压缩前传感器噪声 + LR codec 编码**（单次 ffmpeg pass，无 rgb24 中间产物），写出 `codec_cache/manifest.jsonl`
+2. 训练时 `decode=auto` 使用 DALI NVDEC（需 `libnvcuvid`；torchcodec CPU fallback 已移除）
 
-DIV2K 对齐约定：mezzanine 第 `K` 帧对应 `clip_start=K`；`expand_codec_clip_frames` 中 `hr_frame = clip_start`。
+退化链顺序模拟真实视频采集：HR 无损 -> 光学低通模糊 -> 传感器噪声 -> 混合下采样核（area/bicubic/lanczos）-> codec 编码；在线 augment 只保留压缩后的 JPEG/解码噪声，物理顺序正确。GOP 与码率按真实分布采样（log-normal 码率、加权 GOP 候选），I/P 帧在 `expand_codec_clip_frames` 中加权（P 帧权重更高以多见块效应）。
 
 Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NVDEC。
 
@@ -148,14 +147,14 @@ Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NV
 
 推荐用 `scripts/` 下的 bash 入口启动训练与数据准备（内部统一 `uv run` + `torchrun -m ...`）：
 
-| 脚本 | 用途 |
-|------|------|
-| `./scripts/build_data.sh` | Snakemake 构建 train/val manifest + codec cache |
-| `./scripts/run_stage1_8gpu.sh` | Stage 1 八卡 DDP 训练 |
-| `./scripts/bench_dataloader.sh` | 单卡 DataLoader 吞吐 |
-| `./scripts/bench_ddp.sh` | 多卡 DDP step 吞吐 |
-| `./scripts/profile_stage1.sh` | 数据 vs 计算耗时剖析 |
-| `./scripts/generate_report_charts.sh` | 从 `stage1_metrics.json` 生成报告图 |
+| 脚本                                  | 用途                                            |
+| ------------------------------------- | ----------------------------------------------- |
+| `./scripts/build_data.sh`             | Snakemake 构建 train/val manifest + codec cache |
+| `./scripts/run_stage1_8gpu.sh`        | Stage 1 八卡 DDP 训练                           |
+| `./scripts/bench_dataloader.sh`       | 单卡 DataLoader 吞吐                            |
+| `./scripts/bench_ddp.sh`              | 多卡 DDP step 吞吐                              |
+| `./scripts/profile_stage1.sh`         | 数据 vs 计算耗时剖析                            |
+| `./scripts/generate_report_charts.sh` | 从 `stage1_metrics.json` 生成报告图             |
 
 环境变量示例：`SAVE_DIR`、`NPROC`、`RESUME`、`TRAIN_EXPERIMENT_NAME`、`EXTRA_ARGS`。
 
@@ -244,11 +243,11 @@ Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次�
 
 同样为 **step-based**。QAT 分三阶段，由 step 控制切换（非 epoch）：
 
-| 阶段 | step 范围 | 行为 |
-|------|-----------|------|
-| Phase 1 | 1 – `phase1_steps` (3000) | 训练 + 更新 observer |
+| 阶段    | step 范围                                | 行为                                |
+| ------- | ---------------------------------------- | ----------------------------------- |
+| Phase 1 | 1 – `phase1_steps` (3000)                | 训练 + 更新 observer                |
 | Phase 2 | `phase1_steps+1` – `phase2_steps` (9000) | 冻结 observer，继续 fake-quant 训练 |
-| Phase 3 | `phase2_steps+1` – `max_steps` (15000) | 冻结 fake-quant，权重微调 |
+| Phase 3 | `phase2_steps+1` – `max_steps` (15000)   | 冻结 fake-quant，权重微调           |
 
 ```bash
 torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
@@ -287,8 +286,8 @@ uv run rk3588-mobile-sr export-onnx \
 ```bash
 uv run rk3588-mobile-sr eval \
   --weight checkpoints/stage1/best.pth \
-  --hr_dir data/DIV2K_valid_HR \
-  --lr_dir data/DIV2K_valid_LR_bicubic/X3 \
+  --hr_dir data/UVG_raw/yuv_1080p \
+  --lr_dir data/codec_cache \
   --save_dir results/stage1
 ```
 

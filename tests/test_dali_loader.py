@@ -13,8 +13,12 @@ from rk3588_mobile_sr.data.codec_index import (
     expand_codec_clip_frames,
     write_paired_file_lists,
 )
+from rk3588_mobile_sr.data.train_loader import (
+    TrainDataSettings,
+    build_codec_train_loader,
+    nvidia_cuvid_available,
+)
 from rk3588_mobile_sr.data.types import SourceRecord
-from rk3588_mobile_sr.data.train_loader import TrainDataSettings, build_codec_train_loader, nvidia_cuvid_available
 from tests.helpers.codec_fixture import build_snakemake_codec_fixture as _build_fixture
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg required")
@@ -27,7 +31,9 @@ def test_expand_codec_clip_frames(tmp_path: Path):
     entries = expand_codec_clip_frames([record], tmp_path)
     assert len(entries) == row["clip_frames"]
     assert entries[0].lr_frame == 0
-    assert entries[0].hr_frame == row["clip_start"]
+    # HR is now a per-clip lossless extraction starting at frame 0, so hr_frame
+    # is clip-relative (not the absolute source frame clip_start).
+    assert entries[0].hr_frame == 0
 
 
 def test_write_paired_file_lists_sync(tmp_path: Path):

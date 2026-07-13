@@ -69,7 +69,7 @@ def bench_loader(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--codec_manifest", default="data/codec_cache/manifest.jsonl")
-    parser.add_argument("--decode", default="auto", choices=["auto", "dali", "torchcodec"])
+    parser.add_argument("--decode", default="auto", choices=["auto", "dali"])
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=20)

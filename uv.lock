@@ -2035,7 +2035,6 @@ dependencies = [
     { name = "snakemake" },
     { name = "swanlab" },
     { name = "torch" },
-    { name = "torchcodec" },
     { name = "torchvision" },
     { name = "traceml-ai" },
     { name = "typer" },
@@ -2061,7 +2060,6 @@ requires-dist = [
     { name = "snakemake", specifier = ">=8" },
     { name = "swanlab", specifier = ">=0.5.0" },
     { name = "torch", specifier = ">=2.12.0", index = "https://download.pytorch.org/whl/cu132" },
-    { name = "torchcodec", specifier = ">=0.14" },
     { name = "torchvision", specifier = ">=0.27.0", index = "https://download.pytorch.org/whl/cu132" },
     { name = "traceml-ai", specifier = ">=0.3.1" },
     { name = "typer", specifier = ">=0.12.0" },
@@ -2599,17 +2597,6 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-manylinux_2_28_aarch64.whl", upload-time = "2026-07-08T11:20:33Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:34Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-win_amd64.whl", upload-time = "2026-07-08T11:20:36Z" },
-]
-
-[[package]]
-name = "torchcodec"
-version = "0.14.0"
-source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
-wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/36/72/b24c76e0090b930b0dfd3a0a40bf207485a0a9a92d1b9617318b5ec52279/torchcodec-0.14.0-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:849b55c16d3d9791f07c7ff5ef6168a94bbd981e2e9e581999c9a2a8a660c61c" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/10/ba/8e643dbc3ef7a195eb7abeabc19eba3c3f32f9a0e2919fd5b6d3939a2c24/torchcodec-0.14.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:db8740f5380d4345e7b1586ac957cde6dbce5be0a9079b9a8f8e5dad528af841" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/39/f4/1bc51a86fda6359ae64fb8e772512dbab01546bd27e14d715c29bd416813/torchcodec-0.14.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:9a8770b44ef71ef6a94581b9b1691370bfbc766396ecbb754967eceeb83fe58e" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/0f/7b/f9cf0b8f6c1d9033158d11494c4111d8e102122649330f6d48d18263a4d8/torchcodec-0.14.0-cp312-cp312-win_amd64.whl", hash = "sha256:c299a5309d883e2d9cdcf11e297e2859fade5b20254c716f31e77fa57e4f455e" },
 ]
 
 [[package]]

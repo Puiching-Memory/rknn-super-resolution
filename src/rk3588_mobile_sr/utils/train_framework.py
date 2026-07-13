@@ -63,8 +63,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--decode",
         type=str,
         default=None,
-        choices=["auto", "dali", "torchcodec"],
-        help="video decode backend: auto (NVDEC when available), dali, or torchcodec",
+        choices=["auto", "dali"],
+        help="video decode backend: auto or dali (NVDEC required; torchcodec removed)",
     )
     parser.add_argument("--scale", type=int, default=3)
     parser.add_argument("--num_channels", type=int, default=32)

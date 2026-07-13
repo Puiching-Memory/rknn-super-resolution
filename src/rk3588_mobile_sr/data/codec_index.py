@@ -44,16 +44,21 @@ def expand_codec_clip_frames(
         if not hr_path.is_file():
             raise FileNotFoundError(hr_path)
 
-        clip_start = int(record.extra.get("clip_start", 0))
         clip_frames = int(record.extra.get("clip_frames", record.frames))
+        gop = int(record.extra.get("gop", 1))
         for rel in range(clip_frames):
+            # I-frames (rel % gop == 0) are clean and easy to super-resolve;
+            # P-frames carry the codec blocking/ringing we want the model to
+            # see more of, so they get a higher sampling weight.
+            is_intra = (rel % max(gop, 1)) == 0
+            frame_weight = 0.5 if is_intra else 1.0
             entries.append(
                 CodecFrameEntry(
                     lr_path=lr_path,
                     hr_path=hr_path,
                     lr_frame=rel,
-                    hr_frame=clip_start + rel,
-                    weight=record.weight,
+                    hr_frame=rel,
+                    weight=record.weight * frame_weight,
                     record_id=record.id,
                 )
             )

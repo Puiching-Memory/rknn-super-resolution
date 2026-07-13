@@ -11,7 +11,14 @@ import torch
 
 @dataclass(frozen=True)
 class AugmentConfig:
-    """Training augmentations for canvas codec LR/HR pairs."""
+    """Training augmentations for canvas codec LR/HR pairs.
+
+    Pre-compression capture degradations (optical low-pass blur, sensor noise)
+    are applied offline in ``degrade_encode`` so they sit *before* the codec
+    block structure. Only *post-compression* artifacts (transport re-compression,
+    decode noise) remain here and are applied after the LR codec frame is
+    decoded, matching the physical order of real video delivery.
+    """
 
     # Paired geometric (LR + HR, same random params).
     flip_h: bool = True
@@ -20,16 +27,12 @@ class AugmentConfig:
     rot90: bool = False
     rot90_resize_back: bool = True
 
-    # LR-only degradations (HR stays clean supervision).
-    lr_gaussian_blur: bool = False
-    lr_motion_blur: bool = False
-    lr_gaussian_noise: bool = False
+    # Post-compression LR-only degradations (HR stays clean supervision).
     lr_jpeg: bool = False
-    blur_p: float = 0.3
-    motion_blur_p: float = 0.2
-    noise_p: float = 0.3
+    lr_decode_noise: bool = False
     jpeg_p: float = 0.3
-    noise_std: float = 5.0
+    decode_noise_p: float = 0.3
+    decode_noise_std: float = 3.0
     jpeg_quality: tuple[float, float] = (40.0, 85.0)
 
 
@@ -60,31 +63,19 @@ def build_paired_augment(config: AugmentConfig) -> K.AugmentationSequential:
 
 @lru_cache(maxsize=32)
 def build_lr_degrade_augment(config: AugmentConfig) -> K.AugmentationSequential:
-    """Blur / noise / JPEG on LR input only (simulates extra capture/codec stress)."""
+    """Post-compression artifacts on LR input only.
+
+    Optical blur / sensor noise are handled offline (pre-compression); here we
+    only inject transport re-compression (JPEG) and light decode noise, which
+    must follow the codec block structure to stay in-distribution.
+    """
     ops: list[K.Augmentation] = []
-    if config.lr_gaussian_blur:
-        ops.append(
-            K.RandomGaussianBlur(
-                kernel_size=(3, 7),
-                sigma=(0.5, 2.0),
-                p=config.blur_p,
-            )
-        )
-    if config.lr_motion_blur:
-        ops.append(
-            K.RandomMotionBlur(
-                kernel_size=5,
-                angle=(-15.0, 15.0),
-                direction=(-1.0, 1.0),
-                p=config.motion_blur_p,
-            )
-        )
-    if config.lr_gaussian_noise:
+    if config.lr_decode_noise:
         ops.append(
             K.RandomGaussianNoise(
                 mean=0.0,
-                std=config.noise_std,
-                p=config.noise_p,
+                std=config.decode_noise_std,
+                p=config.decode_noise_p,
             )
         )
     if config.lr_jpeg:
@@ -133,9 +124,7 @@ def augment_config_for_canvas(
     *,
     augment_rot90: bool = False,
     patch_size: int | None = None,
-    augment_lr_blur: bool = False,
-    augment_lr_motion_blur: bool = False,
-    augment_lr_noise: bool = False,
+    augment_lr_decode_noise: bool = False,
     augment_lr_jpeg: bool = False,
 ) -> AugmentConfig:
     """Build AugmentConfig for full-canvas or patch training."""
@@ -143,9 +132,7 @@ def augment_config_for_canvas(
     return AugmentConfig(
         rot90=use_rot90,
         rot90_resize_back=patch_size is None,
-        lr_gaussian_blur=augment_lr_blur,
-        lr_motion_blur=augment_lr_motion_blur,
-        lr_gaussian_noise=augment_lr_noise,
+        lr_decode_noise=augment_lr_decode_noise,
         lr_jpeg=augment_lr_jpeg,
     )
 

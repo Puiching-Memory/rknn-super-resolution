@@ -1,24 +1,36 @@
-"""Snakemake DAG for offline codec cache (orchestration only; logic in data_pipeline package)."""
+"""Snakemake DAG for offline codec cache (orchestration only; logic in data_pipeline package).
+
+Pipeline (still-image/DIV2K support removed, mezzanine CRF18 replaced by
+lossless HR clips, scale+encode merged into a single degrade+encode pass)::
+
+    discover  -> train/val manifests (UVG YUV only)
+    hr_clip   -> per-clip lossless H.264 HR (bit-exact with source YUV)
+    degrade_and_encode -> mixed-kernel downsample + pre-compression noise
+                          + LR codec encode (single ffmpeg pass, no rgb24
+                          intermediate)
+    write_codec_manifest -> codec_cache/manifest.jsonl
+"""
 
 from pathlib import Path
 
 configfile: "config.yaml"
 
 PIPELINE_DIR = Path(workflow.basedir).resolve()
+FFMPEG_DIR = PIPELINE_DIR / "ffmpeg"
 
 TRAIN_MANIFEST = config["train_manifest"]
 VAL_MANIFEST = config["val_manifest"]
 CODEC_CACHE = config["codec_cache_dir"]
-MEZZANINE = config["mezzanine_dir"]
-SCALED = config["scaled_dir"]
+HR_DIR = config["hr_dir"]
 MANIFEST_OUT = f"{CODEC_CACHE}/manifest.jsonl"
 
 from rk3588_mobile_sr.data_pipeline.clip_plan import (
+    DEFAULT_GOP_CANDIDATES,
+    DEFAULT_GOP_WEIGHTS,
     iter_encode_jobs,
     load_train_sources,
-    unique_scale_jobs,
 )
-from rk3588_mobile_sr.data_pipeline.paths import lr_mp4_path
+from rk3588_mobile_sr.data_pipeline.paths import hr_clip_path, lr_mp4_path
 
 _train_path = Path(TRAIN_MANIFEST)
 if _train_path.is_file():
@@ -34,16 +46,14 @@ JOBS = (
         clips_per_video=config["clips_per_video"],
         codecs=config["codecs"],
         bitrates_kbps=config["bitrates_kbps"],
-        gop=config["gop"],
-        image_gop=config["image_gop"],
+        gop_candidates=config.get("gop_candidates", DEFAULT_GOP_CANDIDATES),
+        gop_weights=config.get("gop_weights", DEFAULT_GOP_WEIGHTS),
         seed=config["seed"],
     )
     if SOURCES
     else []
 )
-SCALE_JOBS = unique_scale_jobs(JOBS)
 
-SCALE_JOB_BY_KEY = {(job["safe_id"], job["clip_start"]): job for job in SCALE_JOBS}
 ENCODE_JOB_BY_KEY = {
     (
         job["safe_id"],
@@ -74,6 +84,18 @@ def _source_path(safe_id: str) -> str:
     return str(Path(SOURCE_BY_SAFE[safe_id].path).resolve())
 
 
+def _job(wildcards):
+    return ENCODE_JOB_BY_KEY[
+        (
+            wildcards.safe_id,
+            int(wildcards.clip),
+            int(wildcards.gop),
+            wildcards.codec,
+            int(wildcards.bitrate),
+        )
+    ]
+
+
 rule discover:
     output:
         train=TRAIN_MANIFEST,
@@ -81,102 +103,42 @@ rule discover:
     shell:
         "uv run python -m rk3588_mobile_sr.data_pipeline.discover_sources "
         f"--root . --train-out {config['train_manifest']} "
-        f"--val-out {config['val_manifest']} --div2k-weight {config['div2k_weight']}"
+        f"--val-out {config['val_manifest']}"
 
 
-rule mezzanine:
+rule hr_clip:
     output:
-        f"{MEZZANINE}/{{safe_id}}_hr.mp4",
+        f"{HR_DIR}/{{safe_id}}_s{{clip}}_hr.mp4",
     params:
-        source=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id],
         src_path=lambda wildcards: _source_path(wildcards.safe_id),
         width=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id].width,
         height=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id].height,
         fps=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id].fps or 30,
-        crf=config["mezzanine_crf"],
-        mezz_gop=config["mezzanine_gop"],
-        preset=config["preset"],
-        clips_per_video=config["clips_per_video"],
-    run:
-        if params.source.type == "yuv_video":
-            shell(
-                "bash {PIPELINE_DIR}/ffmpeg/mezzanine_yuv.sh "
-                "{params.src_path} {output} {params.width} {params.height} "
-                "{params.fps} {params.crf} {params.mezz_gop} {params.preset}",
-            )
-        else:
-            shell(
-                "uv run python -m rk3588_mobile_sr.data_pipeline.mezzanine_image "
-                "{params.src_path} {output} "
-                "--source-id {params.source.id} "
-                "--canvas-h {params.height} --canvas-w {params.width} "
-                "--clips-per-video {params.clips_per_video} "
-                "--fps {params.fps} --mezzanine-gop {params.mezz_gop}",
-            )
-
-
-rule scale_clip:
-    input:
-        mezz=f"{MEZZANINE}/{{safe_id}}_hr.mp4",
-    output:
-        f"{SCALED}/{{safe_id}}_s{{clip}}.rgb",
-    params:
-        fps=lambda wildcards: SCALE_JOB_BY_KEY[
-            (wildcards.safe_id, int(wildcards.clip))
-        ]["fps"],
-        source_type=lambda wildcards: SCALE_JOB_BY_KEY[
-            (wildcards.safe_id, int(wildcards.clip))
-        ]["source_type"],
-        lr_w=config["lr_width"],
-        lr_h=config["lr_height"],
         clip_frames=config["clip_frames"],
-    run:
-        if params.source_type == "yuv_video":
-            shell(
-                "bash {PIPELINE_DIR}/ffmpeg/scale_clip_video.sh "
-                "{input} {output} {wildcards.clip} {params.clip_frames} "
-                "{params.lr_w} {params.lr_h} {params.fps}",
-            )
-        else:
-            shell(
-                "bash {PIPELINE_DIR}/ffmpeg/scale_clip_image.sh "
-                "{input} {output} {wildcards.clip} "
-                "{params.lr_w} {params.lr_h} {params.fps}",
-            )
+    shell:
+        "bash {FFMPEG_DIR}/hr_clip.sh "
+        "{params.src_path} {output} {params.width} {params.height} "
+        "{params.fps} {wildcards.clip} {params.clip_frames}"
 
 
-rule lr_encode:
+rule degrade_and_encode:
     input:
-        scaled=f"{SCALED}/{{safe_id}}_s{{clip}}.rgb",
+        hr=f"{HR_DIR}/{{safe_id}}_s{{clip}}_hr.mp4",
     output:
         f"{CODEC_CACHE}/{{safe_id}}_s{{clip}}_g{{gop}}_{{codec}}_{{bitrate}}k.mp4",
     params:
-        clip_frames=lambda wildcards: ENCODE_JOB_BY_KEY[
-            (
-                wildcards.safe_id,
-                int(wildcards.clip),
-                int(wildcards.gop),
-                wildcards.codec,
-                int(wildcards.bitrate),
-            )
-        ]["clip_frames"],
-        fps=lambda wildcards: ENCODE_JOB_BY_KEY[
-            (
-                wildcards.safe_id,
-                int(wildcards.clip),
-                int(wildcards.gop),
-                wildcards.codec,
-                int(wildcards.bitrate),
-            )
-        ]["fps"],
+        clip_frames=lambda wildcards: _job(wildcards)["clip_frames"],
+        fps=lambda wildcards: _job(wildcards)["fps"],
+        source_id=lambda wildcards: _job(wildcards)["source_id"],
         lr_w=config["lr_width"],
         lr_h=config["lr_height"],
         preset=config["preset"],
     shell:
-        "bash {PIPELINE_DIR}/ffmpeg/encode_lr.sh "
-        "{input} {output} {params.lr_w} {params.lr_h} {params.fps} "
-        "{params.clip_frames} {wildcards.codec} {wildcards.gop} {wildcards.bitrate} "
-        "{params.preset}"
+        "uv run python -m rk3588_mobile_sr.data_pipeline.degrade_encode "
+        "{input.hr} {output} --lr-w {params.lr_w} --lr-h {params.lr_h} "
+        "--fps {params.fps} --frames {params.clip_frames} --codec {wildcards.codec} "
+        "--gop {wildcards.gop} --bitrate {wildcards.bitrate} --preset {params.preset} "
+        "--source-id {params.source_id} --clip-start {wildcards.clip}"
 
 
 rule write_codec_manifest:
@@ -189,11 +151,13 @@ rule write_codec_manifest:
         "uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest "
         f"--root . --train-manifest {config['train_manifest']} "
         f"--output {config['codec_cache_dir']}/manifest.jsonl "
-        f"--cache-dir {config['codec_cache_dir']} --mezzanine-dir {config['mezzanine_dir']} "
+        f"--cache-dir {config['codec_cache_dir']} --hr-dir {config['hr_dir']} "
         f"--clip-frames {config['clip_frames']} --clips-per-video {config['clips_per_video']} "
         f"--codecs {' '.join(config['codecs'])} "
         f"--bitrates {' '.join(str(b) for b in config['bitrates_kbps'])} "
-        f"--gop {config['gop']} --image-gop {config['image_gop']} --seed {config['seed']} "
+        f"--gop-candidates {' '.join(str(g) for g in config.get('gop_candidates', DEFAULT_GOP_CANDIDATES))} "
+        f"--gop-weights {' '.join(str(w) for w in config.get('gop_weights', DEFAULT_GOP_WEIGHTS))} "
+        f"--seed {config['seed']} "
         f"--lr-height {config['lr_height']} --lr-width {config['lr_width']}"
 
 

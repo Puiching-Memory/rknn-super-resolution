@@ -35,9 +35,7 @@ class DataConfig:
     dali_initial_fill: int = 32
     prefetch_batches: int = 4
     augment_rot90: bool = False
-    augment_lr_blur: bool = False
-    augment_lr_motion_blur: bool = False
-    augment_lr_noise: bool = False
+    augment_lr_decode_noise: bool = False
     augment_lr_jpeg: bool = False
 
 

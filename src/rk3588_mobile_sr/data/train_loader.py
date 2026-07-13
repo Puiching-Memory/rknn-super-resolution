@@ -1,20 +1,18 @@
-"""Canvas codec training loader (DALI NVDEC + TorchCodec fallback)."""
+"""Canvas codec training loader (DALI NVDEC only)."""
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import warnings
-from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
 
+import nvidia.dali.fn as fn
+import nvidia.dali.types as types
 import torch
 import torch.nn.functional as F
 from nvidia.dali import pipeline_def
-import nvidia.dali.fn as fn
-import nvidia.dali.types as types
 from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
 
 from rk3588_mobile_sr.data.augment import (
@@ -22,16 +20,8 @@ from rk3588_mobile_sr.data.augment import (
     batch_augment_pair,
     batch_random_crop_pair,
 )
-from rk3588_mobile_sr.data.codec_index import CodecFrameEntry, build_codec_frame_index
+from rk3588_mobile_sr.data.codec_index import build_codec_frame_index
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_model_colorspace
-
-_TORCHCODEC_AVAILABLE = False
-try:
-    from torchcodec.decoders import VideoDecoder
-
-    _TORCHCODEC_AVAILABLE = True
-except ImportError:
-    VideoDecoder = None  # type: ignore[misc, assignment]
 
 
 def uint8_bchw_to_float(batch: torch.Tensor) -> torch.Tensor:
@@ -58,9 +48,7 @@ def apply_canvas_batch_transform(
     patch_size: int | None = None,
     scale: int = 3,
     augment_rot90: bool = False,
-    augment_lr_blur: bool = False,
-    augment_lr_motion_blur: bool = False,
-    augment_lr_noise: bool = False,
+    augment_lr_decode_noise: bool = False,
     augment_lr_jpeg: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Resize, optionally crop, augment, and convert decoded RGB batches."""
@@ -92,9 +80,7 @@ def apply_canvas_batch_transform(
             config=augment_config_for_canvas(
                 augment_rot90=augment_rot90,
                 patch_size=patch_size,
-                augment_lr_blur=augment_lr_blur,
-                augment_lr_motion_blur=augment_lr_motion_blur,
-                augment_lr_noise=augment_lr_noise,
+                augment_lr_decode_noise=augment_lr_decode_noise,
                 augment_lr_jpeg=augment_lr_jpeg,
             ),
             lr_canvas=(lr_h, lr_w),
@@ -186,7 +172,7 @@ class DaliCodecTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
         if not nvidia_cuvid_available():
             raise RuntimeError(
                 "DALI video decode requires libnvcuvid.so (NVDEC). "
-                "Set NVIDIA_DRIVER_CAPABILITIES=compute,utility,video or use decode=torchcodec."
+                "Set NVIDIA_DRIVER_CAPABILITIES=compute,utility,video."
             )
 
         self._settings = settings
@@ -241,9 +227,7 @@ class DaliCodecTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
                 patch_size=self._settings.patch_size,
                 scale=self._settings.scale,
                 augment_rot90=self._settings.augment_rot90,
-                augment_lr_blur=self._settings.augment_lr_blur,
-                augment_lr_motion_blur=self._settings.augment_lr_motion_blur,
-                augment_lr_noise=self._settings.augment_lr_noise,
+                augment_lr_decode_noise=self._settings.augment_lr_decode_noise,
                 augment_lr_jpeg=self._settings.augment_lr_jpeg,
             )
 
@@ -252,137 +236,27 @@ class DaliCodecTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
             self._index.temp_dir.cleanup()
 
 
-def _frame_to_float_rgb(frame: torch.Tensor) -> torch.Tensor:
-    out = frame.float() if frame.dtype != torch.float32 else frame
-    if out.numel() > 0 and out.max() <= 1.0:
-        out = out * 255.0
-    return out
-
-
-class TorchCodecTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
-    """Infinite iterator decoding codec frames on CPU, post-processing on GPU."""
-
-    def __init__(
-        self,
-        manifest: str | Path,
-        *,
-        project_root: Path,
-        settings: TrainDataSettings,
-        batch_size: int,
-        device_id: int,
-        rank: int,
-        world_size: int,
-        seed: int,
-    ) -> None:
-        if VideoDecoder is None:
-            raise RuntimeError("torchcodec is required for CPU decode fallback")
-
-        self._settings = settings
-        self._batch_size = batch_size
-        self._device = torch.device(f"cuda:{device_id}")
-        self._world_size = world_size
-        index = build_codec_frame_index(
-            manifest,
-            project_root=project_root,
-            seed=seed + rank,
-            for_dali=False,
-        )
-        self._entries = index.entries
-        self._pos = rank % max(len(self._entries), 1)
-        self._lr_decoders: dict[Path, object] = {}
-        self._hr_decoders: dict[Path, object] = {}
-
-    def _decoder(self, path: Path, cache: dict[Path, object]) -> VideoDecoder:
-        if path not in cache:
-            cache[path] = VideoDecoder(str(path), device="cpu", num_ffmpeg_threads=0)
-        return cache[path]  # type: ignore[return-value]
-
-    def _next_batch_entries(self) -> list[CodecFrameEntry]:
-        n = len(self._entries)
-        if n == 0:
-            raise RuntimeError("codec manifest produced zero training frames")
-        batch: list[CodecFrameEntry] = []
-        for _ in range(self._batch_size):
-            batch.append(self._entries[self._pos % n])
-            self._pos += self._world_size
-        return batch
-
-    def __iter__(self) -> TorchCodecTrainIterator:
-        return self
-
-    def __next__(self) -> tuple[torch.Tensor, torch.Tensor]:
-        entries = self._next_batch_entries()
-        by_lr: dict[Path, list[tuple[int, int]]] = defaultdict(list)
-        by_hr: dict[Path, list[tuple[int, int]]] = defaultdict(list)
-        for out_idx, entry in enumerate(entries):
-            by_lr[entry.lr_path].append((entry.lr_frame, out_idx))
-            by_hr[entry.hr_path].append((entry.hr_frame, out_idx))
-
-        lr_frames = [torch.empty(0)] * len(entries)
-        hr_frames = [torch.empty(0)] * len(entries)
-
-        for path, items in by_lr.items():
-            dec = self._decoder(path, self._lr_decoders)
-            indices = [i for i, _ in items]
-            batch = dec.get_frames_at(indices)
-            for (frame_idx, out_idx), tensor in zip(items, batch.data, strict=True):
-                del frame_idx
-                lr_frames[out_idx] = _frame_to_float_rgb(tensor)
-
-        for path, items in by_hr.items():
-            dec = self._decoder(path, self._hr_decoders)
-            indices = [i for i, _ in items]
-            batch = dec.get_frames_at(indices)
-            for (frame_idx, out_idx), tensor in zip(items, batch.data, strict=True):
-                del frame_idx
-                hr_frames[out_idx] = _frame_to_float_rgb(tensor)
-
-        lr = torch.stack(lr_frames, dim=0)
-        hr = torch.stack(hr_frames, dim=0)
-        lr_u8 = lr.clamp(0, 255).to(torch.uint8)
-        hr_u8 = hr.clamp(0, 255).to(torch.uint8)
-        return apply_canvas_batch_transform(
-            lr_u8,
-            hr_u8,
-            lr_size=self._settings.lr_size,
-            hr_size=self._settings.hr_size,
-            colorspace=self._settings.colorspace,
-            nv12_simulate=self._settings.nv12_simulate,
-            augment=self._settings.augment,
-            device=self._device,
-            patch_size=self._settings.patch_size,
-            scale=self._settings.scale,
-            augment_rot90=self._settings.augment_rot90,
-            augment_lr_blur=self._settings.augment_lr_blur,
-            augment_lr_motion_blur=self._settings.augment_lr_motion_blur,
-            augment_lr_noise=self._settings.augment_lr_noise,
-            augment_lr_jpeg=self._settings.augment_lr_jpeg,
-        )
-
-    def close(self) -> None:
-        self._lr_decoders.clear()
-        self._hr_decoders.clear()
-
-
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
 def resolve_decode_backend(requested: str) -> str:
-    """Pick DALI or TorchCodec from config."""
-    if requested == "dali":
-        if not nvidia_cuvid_available():
-            raise RuntimeError("decode=dali requires libnvcuvid.so (NVDEC)")
+    """Resolve the decode backend. Only DALI (NVDEC) is supported now; the
+    torchcodec CPU fallback has been removed because its libav coupling was
+    fragile and the project targets GPU training environments."""
+    if requested in ("dali", "auto"):
         if not torch.cuda.is_available():
-            raise RuntimeError("decode=dali requires CUDA")
+            raise RuntimeError(
+                "decode requires CUDA (DALI NVDEC); torchcodec fallback removed"
+            )
+        if not nvidia_cuvid_available():
+            raise RuntimeError(
+                "decode requires libnvcuvid.so (NVDEC); torchcodec fallback removed"
+            )
         return "dali"
-    if requested == "torchcodec":
-        return "torchcodec"
-    if requested == "auto":
-        if torch.cuda.is_available() and nvidia_cuvid_available():
-            return "dali"
-        return "torchcodec"
-    raise ValueError(f"Unsupported decode {requested!r}; use auto, dali, or torchcodec")
+    raise ValueError(
+        f"Unsupported decode {requested!r}; use auto or dali (torchcodec removed)"
+    )
 
 
 @dataclass(frozen=True)
@@ -400,9 +274,7 @@ class TrainDataSettings:
     patch_size: int | None = None
     scale: int = 3
     augment_rot90: bool = False
-    augment_lr_blur: bool = False
-    augment_lr_motion_blur: bool = False
-    augment_lr_noise: bool = False
+    augment_lr_decode_noise: bool = False
     augment_lr_jpeg: bool = False
 
 
@@ -431,34 +303,20 @@ def build_codec_train_loader(
     root = Path(settings.project_root or project_root())
     dev_id = rank if device_id is None else device_id
     backend = resolve_decode_backend(settings.decode)
-
-    if backend == "dali":
-        iterator = DaliCodecTrainIterator(
-            settings.codec_manifest,
-            project_root=root,
-            settings=settings,
-            batch_size=batch_size,
-            device_id=dev_id,
-            rank=rank,
-            world_size=world_size,
-            seed=seed,
+    if backend != "dali":
+        raise RuntimeError(
+            f"only DALI backend supported (torchcodec removed), got {backend!r}"
         )
-    else:
-        if settings.decode == "auto" and not nvidia_cuvid_available():
-            warnings.warn(
-                "NVDEC unavailable; falling back to TorchCodec CPU decode.",
-                stacklevel=2,
-            )
-        iterator = TorchCodecTrainIterator(
-            settings.codec_manifest,
-            project_root=root,
-            settings=settings,
-            batch_size=batch_size,
-            device_id=dev_id,
-            rank=rank,
-            world_size=world_size,
-            seed=seed,
-        )
+    iterator = DaliCodecTrainIterator(
+        settings.codec_manifest,
+        project_root=root,
+        settings=settings,
+        batch_size=batch_size,
+        device_id=dev_id,
+        rank=rank,
+        world_size=world_size,
+        seed=seed,
+    )
 
     return CodecTrainLoader(dataloader=iterator, _close=iterator)
 
@@ -490,10 +348,8 @@ def data_settings_from_args(args) -> TrainDataSettings:
         patch_size=getattr(args, "patch_size", None),
         scale=getattr(args, "scale", 3),
         augment_rot90=getattr(data, "augment_rot90", False),
-        augment_lr_blur=data.augment_lr_blur,
-        augment_lr_motion_blur=data.augment_lr_motion_blur,
-        augment_lr_noise=data.augment_lr_noise,
-        augment_lr_jpeg=data.augment_lr_jpeg,
+        augment_lr_decode_noise=getattr(data, "augment_lr_decode_noise", False),
+        augment_lr_jpeg=getattr(data, "augment_lr_jpeg", False),
         nv12_simulate=getattr(data, "nv12_simulate", True)
         if not getattr(args, "no_nv12_simulate", False)
         else False,

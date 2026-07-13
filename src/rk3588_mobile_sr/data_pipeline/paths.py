@@ -9,8 +9,9 @@ def safe_source_id(source_id: str) -> str:
     return source_id.replace("/", "__")
 
 
-def hr_mezzanine_path(mezzanine_dir: Path, source_id: str) -> Path:
-    return mezzanine_dir / f"{safe_source_id(source_id)}_hr.mp4"
+def hr_clip_path(hr_dir: Path, *, source_id: str, clip_start: int) -> Path:
+    """Path to the per-clip lossless HR mp4 (one clip per file)."""
+    return hr_dir / f"{safe_source_id(source_id)}_s{clip_start}_hr.mp4"
 
 
 def lr_mp4_path(

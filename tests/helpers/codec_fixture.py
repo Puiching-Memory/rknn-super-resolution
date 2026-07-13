@@ -8,8 +8,6 @@ from pathlib import Path
 
 import yaml
 
-from rk3588_mobile_sr.data.yuv_video import yuv420_frame_bytes
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SNAKEFILE = REPO_ROOT / "scripts/pipeline/Snakefile"
 BASE_CONFIG = REPO_ROOT / "scripts/pipeline/config.yaml"
@@ -84,14 +82,12 @@ def run_snakemake_pipeline(
 def build_snakemake_codec_fixture(
     tmp_path: Path,
     *,
-    with_mezzanine: bool = True,
     width: int = 96,
     height: int = 72,
     frames: int = 8,
     lr_size: tuple[int, int] = (24, 32),
-    hr_size: tuple[int, int] | None = None,
 ) -> Path:
-    del with_mezzanine, hr_size
+    """Build a minimal YUV -> lossless HR -> LR codec cache via Snakemake."""
     yuv = tmp_path / "clip.yuv"
     write_gray_yuv(yuv, width, height, frames)
     manifest_dir = tmp_path / "data/sources/manifests"

@@ -11,23 +11,24 @@ from rk3588_mobile_sr.data.train_loader import resolve_decode_backend
 
 
 def test_resolve_decode_backend_auto():
-    with patch.object(torch.cuda, "is_available", return_value=True):
-        with patch(
-            "rk3588_mobile_sr.data.train_loader.nvidia_cuvid_available",
-            return_value=True,
-        ):
-            assert resolve_decode_backend("auto") == "dali"
-    with patch.object(torch.cuda, "is_available", return_value=False):
-        assert resolve_decode_backend("auto") == "torchcodec"
+    with patch.object(torch.cuda, "is_available", return_value=True), patch(
+        "rk3588_mobile_sr.data.train_loader.nvidia_cuvid_available",
+        return_value=True,
+    ):
+        assert resolve_decode_backend("auto") == "dali"
+    # torchcodec fallback removed: auto now raises when NVDEC is unavailable.
+    with patch.object(torch.cuda, "is_available", return_value=False), pytest.raises(
+        RuntimeError, match="torchcodec fallback removed"
+    ):
+        resolve_decode_backend("auto")
 
 
 def test_resolve_decode_backend_dali_requires_cuvid():
     with patch(
         "rk3588_mobile_sr.data.train_loader.nvidia_cuvid_available",
         return_value=False,
-    ):
-        with pytest.raises(RuntimeError, match="decode=dali requires"):
-            resolve_decode_backend("dali")
+    ), pytest.raises(RuntimeError, match="torchcodec fallback removed"):
+        resolve_decode_backend("dali")
 
 
 def test_resolve_decode_backend_invalid():

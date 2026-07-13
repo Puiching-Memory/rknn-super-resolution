@@ -77,15 +77,15 @@ flowchart LR
 
 ### 3.2 Stage 2：Fidelity 精调 + 教师蒸馏
 
-| 配置       | 值                                            |
-| ---------- | --------------------------------------------- |
-| Loss       | Charbonnier + λ_dct·L_DCT + λ_kd·L_KD         |
-| Epoch      | 200                                           |
-| LR         | 3e-5                                          |
-| Batch Size | 16                                            |
-| LR Patch   | 160×160                                       |
-| λ_dct      | 0.02                                          |
-| λ_kd       | 0.03                                          |
+| 配置       | 值                                              |
+| ---------- | ----------------------------------------------- |
+| Loss       | Charbonnier + λ_dct·L_DCT + λ_kd·L_KD           |
+| Epoch      | 200                                             |
+| LR         | 3e-5                                            |
+| Batch Size | 16                                              |
+| LR Patch   | 160×160                                         |
+| λ_dct      | 0.02                                            |
+| λ_kd       | 0.03                                            |
 | Teacher    | MambaIRv2Light ×3（`mambairv2_lightSR_x3.pth`） |
 
 > 教师权重来自 [MambaIR v1.0 release](https://github.com/csguoh/MambaIR/releases/tag/v1.0)（`mambairv2_lightSR_x3.pth`）。首次安装 `mamba-ssm` 会从源码编译，同样需要能访问 PyPI/GitHub（必要时开代理后 `uv sync`）。

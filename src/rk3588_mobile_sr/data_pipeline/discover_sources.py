@@ -1,4 +1,9 @@
-"""Discover UVG YUV and DIV2K PNG sources; write train/val manifests."""
+"""Discover UVG YUV sources; write train/val manifests.
+
+Still-image (DIV2K) support has been removed: the pipeline is now driven
+entirely by native YUV420p video sequences so that the supervision signal and
+the simulated capture/codec degradation chain match real video content.
+"""
 
 from __future__ import annotations
 
@@ -36,28 +41,6 @@ def uvg_entries(root: Path) -> list[SourceRow]:
     return entries
 
 
-def div2k_entries(root: Path, *, weight: float) -> list[SourceRow]:
-    hr_dir = root / "data" / "DIV2K_train_HR"
-    if not hr_dir.is_dir():
-        return []
-    rows: list[SourceRow] = []
-    for path in sorted(hr_dir.glob("*.png")):
-        rows.append(
-            SourceRow(
-                id=f"div2k/{path.stem}",
-                type="image",
-                path=path.relative_to(root).as_posix(),
-                width=1920,
-                height=1080,
-                fps=30,
-                frames=1,
-                weight=weight,
-                tags=["texture", "div2k"],
-            )
-        )
-    return rows
-
-
 def val_entries(root: Path) -> list[ValRow]:
     yuv_dir = root / "data" / "UVG_raw" / "yuv_1080p"
     rows: list[ValRow] = []
@@ -87,9 +70,9 @@ def val_entries(root: Path) -> list[ValRow]:
     return rows
 
 
-def write_train_manifest(root: Path, out: Path, *, div2k_weight: float) -> int:
+def write_train_manifest(root: Path, out: Path) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
-    entries = uvg_entries(root) + div2k_entries(root, weight=div2k_weight)
+    entries = uvg_entries(root)
     with out.open("w", encoding="utf-8") as handle:
         for row in entries:
             handle.write(json.dumps(row.model_dump(), ensure_ascii=False) + "\n")
@@ -118,7 +101,6 @@ def main() -> None:
         type=Path,
         default=Path("data/sources/manifests/val_fixed.jsonl"),
     )
-    parser.add_argument("--div2k-weight", type=float, default=0.3)
     args = parser.parse_args()
     root = args.root.resolve()
     train_out = (
@@ -129,7 +111,7 @@ def main() -> None:
     val_out = (
         (root / args.val_out).resolve() if not args.val_out.is_absolute() else args.val_out
     )
-    n_train = write_train_manifest(root, train_out, div2k_weight=args.div2k_weight)
+    n_train = write_train_manifest(root, train_out)
     n_val = write_val_manifest(root, val_out)
     print(f"wrote {n_train} train entries -> {train_out}")
     print(f"wrote {n_val} val entries -> {val_out}")

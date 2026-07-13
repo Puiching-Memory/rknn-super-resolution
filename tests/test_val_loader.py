@@ -46,10 +46,13 @@ def _codec_clip(
         frames=24,
         extra={
             "source_id": f"uvg/{seq}",
+            "source_path": f"data/UVG_raw/yuv_1080p/{seq}_1920x1080_50fps.yuv",
             "clip_start": clip_start,
             "codec": codec,
             "bitrate_kbps": bitrate,
-            "hr_mp4_path": f"data/mezzanine/uvg__{seq}_hr.mp4",
+            "lr_height": 360,
+            "lr_width": 640,
+            "hr_mp4_path": f"data/hr_lossless/uvg__{seq}_s{clip_start}_hr.mp4",
         },
     )
 

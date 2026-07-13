@@ -94,9 +94,9 @@ def test_lr_degrade_leaves_hr_unchanged():
         flip_h=False,
         flip_v=False,
         rot180=False,
-        lr_gaussian_noise=True,
-        noise_p=1.0,
-        noise_std=10.0,
+        lr_decode_noise=True,
+        decode_noise_p=1.0,
+        decode_noise_std=10.0,
     )
     lr = torch.full((2, 3, 32, 32), 128.0)
     hr = torch.full((2, 3, 96, 96), 200.0)
@@ -113,11 +113,11 @@ def test_lr_degrade_leaves_hr_unchanged():
 
 def test_augment_config_for_canvas_lr_flags():
     cfg = augment_config_for_canvas(
-        augment_lr_blur=True,
+        augment_lr_decode_noise=True,
         augment_lr_jpeg=True,
         patch_size=128,
     )
-    assert cfg.lr_gaussian_blur is True
+    assert cfg.lr_decode_noise is True
     assert cfg.lr_jpeg is True
     assert cfg.rot90 is True
 
