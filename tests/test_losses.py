@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from rk3588_mobile_sr.losses import CharbonnierLoss, ConfidenceWeightedKDLoss, DCTLoss
+from rk3588_mobile_sr.losses import CharbonnierLoss, DCTLoss
 
 
 def test_charbonnier_loss_positive():
@@ -33,19 +33,6 @@ def test_dct_loss_shape_and_sign():
     target = torch.randn(2, 3, 32, 32)
 
     loss = criterion(pred, target)
-    assert loss.dim() == 0
-    assert torch.isfinite(loss)
-    assert loss.item() >= 0.0
-
-
-def test_kd_loss_confidence_weighting():
-    """ConfidenceWeightedKDLoss should reduce with confidence weights."""
-    criterion = ConfidenceWeightedKDLoss()
-    student = torch.randn(2, 3, 8, 8)
-    teacher = torch.randn(2, 3, 8, 8)
-    target = torch.randn(2, 3, 8, 8)
-
-    loss = criterion(student, teacher, target)
     assert loss.dim() == 0
     assert torch.isfinite(loss)
     assert loss.item() >= 0.0

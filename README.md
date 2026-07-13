@@ -5,10 +5,9 @@
 ## 功能特性
 
 - **MobileOne 轻量骨干**：重参数化多分支结构，训练时多分支、推理时融合为单分支，兼顾精度与速度。
-- **三阶段训练流程**：
+- **两阶段训练流程**：
   1. Stage 1：FP32 基线训练（L1 损失）
-  2. Stage 2：知识蒸馏 + DCT 感知损失微调
-  3. Stage 3：量化感知训练（QAT），产出 INT8 友好权重
+  2. Stage 2：量化感知训练（QAT），产出 INT8 友好权重
 - **端到端部署**：支持 PyTorch → ONNX → RKNN 转换链路。
 - **RK3588 适配**：输入固定为 360×640，输出 1080×1920，便于接入视频后处理链路。
 - **SwanLab 实验追踪**：使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录 loss、PSNR 等训练指标，支持云端与本地可视化。
@@ -45,7 +44,7 @@ rk3588_mobile_sr/
 │   ├── losses/                    # 训练损失函数
 │   ├── utils/                     # 训练框架、指标、日志
 │   ├── distributed/               # DDP 上下文、验证、同步原语
-│   ├── train/                     # StepTrainer、TrainSession、Stage 1/2/3
+│   ├── train/                     # StepTrainer、TrainSession、Stage 1/2
 │   ├── eval/                      # PSNR/SSIM 评测
 │   └── deploy/                    # ONNX 导出 + RKNN 转换与精度评测
 ├── scripts/                       # 运维 bash 入口 + pipeline/Snakefile
@@ -88,8 +87,8 @@ torchrun --nproc_per_node=3 rk3588-mobile-sr train stage1 \
   ...
 
 # 评测 / 导出
-uv run rk3588-mobile-sr eval --weight checkpoints/stage2/best.pth ...
-uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage2/best.pth ...
+uv run rk3588-mobile-sr eval --weight checkpoints/stage1/best.pth ...
+uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage1/best.pth ...
 ```
 
 也保留了独立入口别名：`rk3588-train-stage1`、`rk3588-eval-psnr` 等。
@@ -153,13 +152,10 @@ Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NV
 |------|------|
 | `./scripts/build_data.sh` | Snakemake 构建 train/val manifest + codec cache |
 | `./scripts/run_stage1_8gpu.sh` | Stage 1 八卡 DDP 训练 |
-| `./scripts/run_stage2.sh` | Stage 2 蒸馏微调 |
-| `./scripts/download_teacher.sh` | 下载 MambaIRv2Light 教师权重 |
 | `./scripts/bench_dataloader.sh` | 单卡 DataLoader 吞吐 |
 | `./scripts/bench_ddp.sh` | 多卡 DDP step 吞吐 |
 | `./scripts/profile_stage1.sh` | 数据 vs 计算耗时剖析 |
 | `./scripts/generate_report_charts.sh` | 从 `stage1_metrics.json` 生成报告图 |
-| `./scripts/vendor_mambairv2_light.sh` | 从上游同步 MambaIR 结构 |
 
 环境变量示例：`SAVE_DIR`、`NPROC`、`RESUME`、`TRAIN_EXPERIMENT_NAME`、`EXTRA_ARGS`。
 
@@ -224,7 +220,7 @@ traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
 
 - 通过 `traceml run` 启动时 TraceML **默认开启**；普通 `torchrun` 下可用 `--traceml` 手动开启 instrumentation，但完整 summary 仍需 `traceml run`。
 - 可用 `--no-traceml` 关闭；summary 指标会以 `traceml/...` 前缀同步到 SwanLab（若未禁用）。
-- Stage 2 / Stage 3 同样支持：`traceml run rk3588-mobile-sr train stage2 ...`、`traceml run rk3588-mobile-sr train stage3-qat ...`。
+- Stage 2 同样支持：`traceml run rk3588-mobile-sr train stage2 ...`。
 
 ### Stage 1：FP32 基线
 
@@ -244,28 +240,7 @@ uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.stage1 \
 
 Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次，若连续 `--early_stop_patience`（10）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.01 dB）则停止；`--max_steps`（100000）为安全上限。可用 `--no_early_stop` 改为只跑到 `max_steps`。
 
-### Stage 2：蒸馏 + 感知损失微调
-
-与 Stage 1 相同，采用 **step-based** 训练：默认 `--max_steps 80000`，每 `--val_every 4000` step 验证。默认启用 **早停**；可用 `--no_early_stop` 跑满 `max_steps`。需先准备教师模型权重（MambaIRv2Light ×3），默认路径 `checkpoints/teacher/mambairv2_lightSR_x3.pth`：
-
-```bash
-# GitHub 下载需代理时先设置（按你的代理地址修改）
-export https_proxy=http://127.0.0.1:7897 http_proxy=http://127.0.0.1:7897
-
-uv run rk3588-download-teacher   # 或 ./scripts/download_teacher.sh
-```
-
-```bash
-torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --teacher_arch mambairv2_light \
-  --teacher_weight checkpoints/teacher/mambairv2_lightSR_x3.pth \
-  --stage1_weight checkpoints/stage1/best.pth \
-  --save_dir ./checkpoints/stage2
-```
-
-### Stage 3：QAT 量化感知训练
+### Stage 2：QAT 量化感知训练
 
 同样为 **step-based**。QAT 分三阶段，由 step 控制切换（非 epoch）：
 
@@ -276,13 +251,13 @@ torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
 | Phase 3 | `phase2_steps+1` – `max_steps` (15000) | 冻结 fake-quant，权重微调 |
 
 ```bash
-torchrun --nproc_per_node=1 rk3588-mobile-sr train stage3-qat \
-  --stage2_weight checkpoints/stage2/best.pth \
+torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
+  --stage1_weight checkpoints/stage1/best.pth \
   --codec_manifest data/codec_cache/manifest.jsonl \
   --max_steps 15000 \
   --phase1_steps 3000 \
   --phase2_steps 9000 \
-  --save_dir ./checkpoints/stage3_qat
+  --save_dir ./checkpoints/stage2_qat
 ```
 
 ## 导出与评测
@@ -292,14 +267,14 @@ torchrun --nproc_per_node=1 rk3588-mobile-sr train stage3-qat \
 ```bash
 # FP32 ONNX
 uv run rk3588-mobile-sr export-onnx \
-  --weight checkpoints/stage2/best.pth \
+  --weight checkpoints/stage1/best.pth \
   --output mobileone_sr_x3.onnx \
   --input_h 360 \
   --input_w 640
 
 # QAT ONNX
 uv run rk3588-mobile-sr export-onnx \
-  --weight checkpoints/stage3_qat/best.pth \
+  --weight checkpoints/stage2_qat/best.pth \
   --output mobileone_sr_x3_qat.onnx \
   --qat \
   --backend qnnpack \
@@ -311,10 +286,10 @@ uv run rk3588-mobile-sr export-onnx \
 
 ```bash
 uv run rk3588-mobile-sr eval \
-  --weight checkpoints/stage2/best.pth \
+  --weight checkpoints/stage1/best.pth \
   --hr_dir data/DIV2K_valid_HR \
   --lr_dir data/DIV2K_valid_LR_bicubic/X3 \
-  --save_dir results/stage2
+  --save_dir results/stage1
 ```
 
 ## RKNN 部署转换
@@ -362,8 +337,8 @@ deploy:
 
 | 阶段    | 输入分辨率 | 输出分辨率 | 量化 | 部署方式          |
 | ------- | ---------- | ---------- | ---- | ----------------- |
-| Stage 2 | 360×640    | 1080×1920  | FP32 | ONNX / PyTorch    |
-| Stage 3 | 360×640    | 1080×1920  | INT8 | RKNN (RK3588 NPU) |
+| Stage 1 | 360×640    | 1080×1920  | FP32 | ONNX / PyTorch    |
+| Stage 2 | 360×640    | 1080×1920  | INT8 | RKNN (RK3588 NPU) |
 
 详细的落地方案与性能分析见 [docs/RK3588_MobileOne_SR_落地方案.md](docs/RK3588_MobileOne_SR_落地方案.md)。
 

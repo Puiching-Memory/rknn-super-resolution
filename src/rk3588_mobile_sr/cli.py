@@ -13,7 +13,6 @@ from rk3588_mobile_sr.eval.psnr import evaluate
 from rk3588_mobile_sr.eval.psnr import parse_args as eval_parse_args
 from rk3588_mobile_sr.train.stage1 import main as train_stage1_main
 from rk3588_mobile_sr.train.stage2 import main as train_stage2_main
-from rk3588_mobile_sr.train.stage3_qat import main as train_stage3_main
 
 app = typer.Typer(
     name="rk3588-mobile-sr",
@@ -42,14 +41,8 @@ def train_stage1() -> None:
 
 @train_app.command("stage2")
 def train_stage2() -> None:
-    """Stage 2: knowledge distillation + DCT perceptual finetuning."""
+    """Stage 2: quantization-aware training."""
     _run_module_main(train_stage2_main)
-
-
-@train_app.command("stage3-qat")
-def train_stage3_qat() -> None:
-    """Stage 3: quantization-aware training."""
-    _run_module_main(train_stage3_main)
 
 
 @app.command("eval")
@@ -82,17 +75,14 @@ def main() -> None:
         in {
             "stage1",
             "stage2",
-            "stage3-qat",
         }
     ):
         stage = sys.argv[2]
         sys.argv = [f"train_{stage.replace('-', '_')}"] + sys.argv[3:]
         if stage == "stage1":
             train_stage1_main()
-        elif stage == "stage2":
-            train_stage2_main()
         else:
-            train_stage3_main()
+            train_stage2_main()
         return
 
     if len(sys.argv) >= 2 and sys.argv[1] == "eval":

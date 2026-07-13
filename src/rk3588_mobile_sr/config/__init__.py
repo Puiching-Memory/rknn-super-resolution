@@ -54,23 +54,7 @@ class Stage1Config:
 
 
 @dataclass
-class Stage2Config:
-    patch_size: int = 160
-    batch_size: int = 16
-    max_steps: int = 80_000
-    val_every: int = 4000
-    early_stop_patience: int = 8
-    early_stop_min_delta: float = 0.005
-    lr: float = 3e-5
-    lambda_dct: float = 0.02
-    lambda_dists: float = 0.05
-    lambda_kd: float = 0.03
-    teacher_arch: str = "mambairv2_light"
-    teacher_weight: str = "checkpoints/teacher/mambairv2_lightSR_x3.pth"
-
-
-@dataclass
-class Stage3QatConfig:
+class Stage2QatConfig:
     patch_size: int = 144
     batch_size: int = 1
     max_steps: int = 15_000
@@ -83,6 +67,7 @@ class Stage3QatConfig:
     ema_decay: float = 0.999
     bn_batches: int = 64
     backend: str = "qnnpack"
+    stage1_weight: str = "checkpoints/stage1/best.pth"
 
 
 @dataclass
@@ -104,8 +89,7 @@ class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
     stage1: Stage1Config = field(default_factory=Stage1Config)
-    stage2: Stage2Config = field(default_factory=Stage2Config)
-    stage3_qat: Stage3QatConfig = field(default_factory=Stage3QatConfig)
+    stage2_qat: Stage2QatConfig = field(default_factory=Stage2QatConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
 
 
@@ -138,8 +122,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         model=_merge_dataclass(ModelConfig, raw.get("model")),
         data=_merge_dataclass(DataConfig, raw.get("data")),
         stage1=_merge_dataclass(Stage1Config, raw.get("stage1")),
-        stage2=_merge_dataclass(Stage2Config, raw.get("stage2")),
-        stage3_qat=_merge_dataclass(Stage3QatConfig, raw.get("stage3_qat")),
+        stage2_qat=_merge_dataclass(Stage2QatConfig, raw.get("stage2_qat")),
         deploy=_merge_dataclass(DeployConfig, raw.get("deploy")),
     )
 

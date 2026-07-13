@@ -28,7 +28,7 @@ class _NHWCOutputWrapper(nn.Module):
 def parse_args():
     cfg = load_config()
     deploy = cfg.deploy
-    stage3 = cfg.stage3_qat
+    stage2 = cfg.stage2_qat
     parser = argparse.ArgumentParser()
     parser.add_argument("--weight", type=str, required=True)
     parser.add_argument("--output", type=str, default=deploy.onnx_output)
@@ -40,9 +40,9 @@ def parse_args():
     parser.add_argument(
         "--from-qat",
         action="store_true",
-        help="Load a Stage-3 QAT checkpoint (fused deploy graph, fake-quant disabled).",
+        help="Load a Stage-2 QAT checkpoint (fused deploy graph, fake-quant disabled).",
     )
-    parser.add_argument("--backend", type=str, default=stage3.backend)
+    parser.add_argument("--backend", type=str, default=stage2.backend)
     parser.add_argument("--input_h", type=int, default=deploy.input_h)
     parser.add_argument("--input_w", type=int, default=deploy.input_w)
     parser.add_argument(
@@ -62,15 +62,15 @@ def parse_args():
         default=deploy.calib_dir,
         help="Text file listing LR images for BN recalibration.",
     )
-    parser.add_argument("--bn_batches", type=int, default=stage3.bn_batches)
+    parser.add_argument("--bn_batches", type=int, default=stage2.bn_batches)
     parser.add_argument(
         "--identity-var-floor",
         type=float,
         default=1e-2,
         help="Lower bound on identity BN running_var during deploy fuse (0=disable).",
     )
-    parser.add_argument("--clip-min", type=float, default=stage3.clip_min)
-    parser.add_argument("--clip-max", type=float, default=stage3.clip_max)
+    parser.add_argument("--clip-min", type=float, default=stage2.clip_min)
+    parser.add_argument("--clip-max", type=float, default=stage2.clip_max)
     parser.add_argument(
         "--weight-clip",
         action=argparse.BooleanOptionalAction,

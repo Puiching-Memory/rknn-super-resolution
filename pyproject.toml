@@ -1,7 +1,7 @@
 [project]
 name = "rk3588-mobile-sr"
 version = "0.1.0"
-description = "RK3588 MobileOne 3x SISR (360x640 -> 1080x1920) with CUDA 13.0 PyTorch training"
+description = "RK3588 MobileOne 3x SISR (360x640 -> 1080x1920) with CUDA 13.2 PyTorch training"
 readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
@@ -21,8 +21,6 @@ dependencies = [
     "typer>=0.12.0",
     "einops>=0.8.0",
     "torchcodec>=0.14",
-    "causal-conv1d>=1.4.0",
-    "mamba-ssm>=2.2.0",
     "pre-commit>=3.7",
     "pytest>=8.0",
     "ruff>=0.6.0",
@@ -40,7 +38,6 @@ dependencies = [
 rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
 rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
 rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
-rk3588-train-stage3-qat = "rk3588_mobile_sr.train.stage3_qat:main"
 rk3588-build-train-manifest = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
 rk3588-build-val-codec-fixed = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
 rk3588-build-codec-cache = "rk3588_mobile_sr.data_pipeline.cli:main"
@@ -52,17 +49,16 @@ rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
 rk3588-profile-stage1 = "rk3588_mobile_sr.dev.profile_stage1:main"
 rk3588-bench-dataloader = "rk3588_mobile_sr.dev.bench_dataloader:main"
 rk3588-bench-ddp = "rk3588_mobile_sr.dev.bench_ddp:main"
-rk3588-download-teacher = "rk3588_mobile_sr.dev.download_teacher:main"
 rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:main"
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
 nvidia-dali-cuda130 = { index = "nvidia" }
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [[tool.uv.index]]
@@ -71,8 +67,6 @@ url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.extra-build-dependencies]
-mamba-ssm = ["torch", "ninja", "packaging"]
-causal-conv1d = ["torch", "ninja", "packaging"]
 
 [build-system]
 requires = ["hatchling"]

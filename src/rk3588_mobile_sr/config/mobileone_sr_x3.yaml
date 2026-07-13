@@ -30,21 +30,7 @@ stage1:
   lr: 1.0e-3
   loss: "l1"
 
-stage2:
-  patch_size: 160
-  batch_size: 16
-  max_steps: 80000
-  val_every: 4000
-  early_stop_patience: 8
-  early_stop_min_delta: 0.005
-  lr: 3.0e-5
-  lambda_dct: 0.02
-  lambda_dists: 0.05
-  lambda_kd: 0.03
-  teacher_arch: "mambairv2_light"
-  teacher_weight: "checkpoints/teacher/mambairv2_lightSR_x3.pth"
-
-stage3_qat:
+stage2_qat:
   patch_size: 144
   batch_size: 1
   max_steps: 15000
@@ -57,6 +43,7 @@ stage3_qat:
   ema_decay: 0.999
   bn_batches: 64
   backend: "qnnpack"
+  stage1_weight: "checkpoints/stage1/best.pth"
 
 deploy:
   input_h: 360
