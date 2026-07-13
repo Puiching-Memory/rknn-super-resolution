@@ -14,7 +14,7 @@ from pathlib import Path
 
 from rk3588_mobile_sr.data_pipeline.schemas import SourceRow, ValRow
 
-YUV_RE = re.compile(r"^(?P<name>.+)_1920x1080_(?P<fps>\d+)fps\.yuv$")
+YUV_RE = re.compile(r"^(?P<name>.+)_1920x1080_(?P<fps>\d+)fps_420_8bit_YUV\.yuv$")
 FRAME_BYTES = 1920 * 1080 * 3 // 2
 
 

@@ -135,6 +135,7 @@ def watch(
     signal.signal(signal.SIGTERM, _handle_stop)
     signal.signal(signal.SIGINT, _handle_stop)
 
+    # Print initial progress at 0%
     print(
         format_progress_line(
             counts=BuildCounts(0, 0),
@@ -145,6 +146,15 @@ def watch(
         file=stream,
         flush=True,
     )
+
+    # Immediately check once before entering the sleep loop
+    counts = count_outputs(root, config_path)
+    if counts.total > 0:
+        print(
+            format_progress_line(counts=counts, targets=targets, started_at=started_at),
+            file=stream,
+            flush=True,
+        )
 
     while not stop:
         time.sleep(interval)
@@ -159,12 +169,17 @@ def watch(
         if counts.total >= targets.total:
             break
 
+    # Final print: always show the actual completion state as a safeguard
     counts = count_outputs(root, config_path)
     print(
         format_progress_line(counts=counts, targets=targets, started_at=started_at),
         file=stream,
         flush=True,
     )
+    if counts.total >= targets.total:
+        print(f"[build_progress] All {targets.total} targets completed.", file=stream, flush=True)
+    else:
+        print(f"[build_progress] WARNING: completed {counts.total}/{targets.total} targets before exit.", file=stream, flush=True)
 
 
 def main(argv: list[str] | None = None) -> None:
