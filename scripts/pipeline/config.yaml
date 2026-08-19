@@ -2,7 +2,9 @@
 train_manifest: data/sources/manifests/train.jsonl
 val_manifest: data/sources/manifests/val_fixed.jsonl
 codec_cache_dir: data/codec_cache
+raw_cache_dir: data/raw_cache   # offline-baked LR RGB uint8 .npy clips
 hr_dir: data/hr_lossless      # per-clip lossless H.264 HR (replaces CRF18 mezzanine)
+
 
 clips_per_video: 8
 clip_frames: 24
@@ -10,6 +12,8 @@ clip_frames: 24
 # short/long-GOP skew of real streamed video instead of a single fixed value.
 gop_candidates: [30, 60, 120]
 gop_weights: [0.4, 0.4, 0.2]
+# Fixed-val bake GOP (covers val_fixed frame_index at clip_start).
+val_gop: 30
 codecs:
   - libx264
   - libx265

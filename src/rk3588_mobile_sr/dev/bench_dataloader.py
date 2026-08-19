@@ -69,7 +69,7 @@ def bench_loader(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--codec_manifest", default="data/codec_cache/manifest.jsonl")
-    parser.add_argument("--decode", default="auto", choices=["auto", "dali"])
+    parser.add_argument("--decode", default="auto", choices=["auto", "raw"])
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=20)
@@ -77,6 +77,7 @@ def main() -> None:
     parser.add_argument("--prefetch_batches", type=int, default=4)
     parser.add_argument("--lr_size", default="360,640")
     parser.add_argument("--hr_size", default="1080,1920")
+    parser.add_argument("--patch_size", type=int, default=128)
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -92,6 +93,9 @@ def main() -> None:
         lr_size=(lr_h, lr_w),
         hr_size=(hr_h, hr_w),
         decode=args.decode,
+        patch_size=args.patch_size if args.patch_size > 0 else None,
+        scale=3,
+        augment=False,
     )
     bundle = build_codec_train_loader(
         settings,
@@ -101,9 +105,10 @@ def main() -> None:
         device_id=args.device_id,
     )
 
+    patch_msg = f"patch={args.patch_size}" if args.patch_size > 0 else "full-canvas"
     print(
         f"Benchmark: batch={args.batch_size}, decode={args.decode}, "
-        f"lr={lr_h}x{lr_w} hr={hr_h}x{hr_w}"
+        f"lr={lr_h}x{lr_w} hr={hr_h}x{hr_w}, {patch_msg}"
     )
     print(f"Device: {torch.cuda.get_device_name(device)}")
     print("-" * 72)

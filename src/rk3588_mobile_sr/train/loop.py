@@ -24,7 +24,11 @@ from rk3588_mobile_sr.utils.model_diagnostics import (
     collect_training_diagnostics,
 )
 from rk3588_mobile_sr.utils.run_logger import logger
-from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, run_training_data_preview
+from rk3588_mobile_sr.utils.swanlab_logging import (
+    log_metrics,
+    run_final_sr_preview,
+    run_training_data_preview,
+)
 from rk3588_mobile_sr.utils.traceml_profiling import trace_training_step
 from rk3588_mobile_sr.utils.train_framework import TrainAccel, amp_autocast, run_backward
 
@@ -238,6 +242,29 @@ class StepTrainer:
                 self.hooks.on_save_last(self.global_step, last_path)
             else:
                 torch.save(self.unwrap.state_dict(), last_path)
+
+        if (
+            self.ctx.is_main
+            and self.val_loader is not None
+            and self.save_dir is not None
+            and self.validation_config.log_images
+        ):
+            try:
+                best_path = self.save_dir / "best.pth"
+                run_final_sr_preview(
+                    self.model,
+                    self.val_loader,
+                    self.ctx.device,
+                    colorspace=self.validation_config.colorspace,
+                    num_samples=self.validation_config.vis_samples,
+                    max_size=self.validation_config.vis_max_size,
+                    save_dir=self.save_dir,
+                    step=self.global_step,
+                    checkpoint=best_path if best_path.is_file() else None,
+                )
+            except Exception as exc:
+                logger.warning("final sr preview failed: {}", exc)
+        self.ctx.barrier()
 
         return self.global_step
 

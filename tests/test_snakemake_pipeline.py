@@ -27,7 +27,7 @@ def test_snakemake_pipeline_smoke(tmp_path: Path):
 
 
 def test_snakemake_dry_run_cache_hit(tmp_path: Path):
-    """Existing mp4 outputs should make snakemake -n report nothing to do."""
+    """Existing .npy outputs should make snakemake -n report nothing to do."""
     build_snakemake_codec_fixture(tmp_path)
     config_path = write_test_config(
         tmp_path,

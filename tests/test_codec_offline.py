@@ -35,22 +35,23 @@ def test_build_codec_cache_manifest(tmp_path: Path):
     cache_manifest = build_snakemake_codec_fixture(tmp_path)
     row = json.loads(cache_manifest.read_text().strip())
     assert row["type"] == "codec_clip"
-    assert "hr_mp4_path" in row          # per-clip lossless HR path is recorded
-    assert "source_path" in row          # raw YUV path for HR supervision
+    assert row["path"].endswith("_lr.npy")  # offline-baked LR RGB frames
+    assert row["hr_path"].endswith("_hr.npy")  # offline-baked HR RGB frames
+    assert "source_path" in row             # provenance YUV path
     assert row["encode_mode"] == "temporal_gop"
 
 
 def test_codec_clip_frame_index_relative_and_weighted(tmp_path: Path):
-    """HR frame index is now clip-relative (0-based) and P-frames weighted higher."""
+    """LR/HR frame indices are clip-relative; P-frames weighted higher."""
     cache_manifest = build_snakemake_codec_fixture(tmp_path)
     row = json.loads(cache_manifest.read_text().strip())
     record = SourceRecord.from_dict(row)
     entries = expand_codec_clip_frames([record], tmp_path)
     assert len(entries) == row["clip_frames"]
-    # hr_frame follows lr_frame (both relative to the clip) now that HR is a
-    # per-clip lossless extraction starting at frame 0.
     assert entries[0].lr_frame == 0
     assert entries[0].hr_frame == 0
+    assert entries[0].lr_path.suffix == ".npy"
+    assert entries[0].hr_path.suffix == ".npy"
     gop = row["gop"]
     intra = {i for i in range(row["clip_frames"]) if i % max(gop, 1) == 0}
     intra_w = entries[0].weight

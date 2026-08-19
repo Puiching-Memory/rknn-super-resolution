@@ -63,8 +63,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--decode",
         type=str,
         default=None,
-        choices=["auto", "dali"],
-        help="video decode backend: auto or dali (NVDEC required; torchcodec removed)",
+        choices=["auto", "raw"],
+        help="frame read backend: auto or raw (offline LR .npy + source YUV)",
     )
     parser.add_argument("--scale", type=int, default=3)
     parser.add_argument("--num_channels", type=int, default=32)
@@ -121,8 +121,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--vis_samples",
         type=int,
-        default=4,
-        help="number of validation image panels to upload to SwanLab",
+        default=8,
+        help="number of validation / data-preview panels (diverse codec×bitrate)",
     )
     parser.add_argument(
         "--no_data_preview",
@@ -345,7 +345,7 @@ def build_loaders(
         batch_size=args.batch_size,
         rank=rank,
         world_size=world_size,
-        seed=42 + rank,
+        seed=42,
         device_id=rank if distributed else 0,
     )
 

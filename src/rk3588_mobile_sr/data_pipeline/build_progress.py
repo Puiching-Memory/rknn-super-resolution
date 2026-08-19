@@ -15,8 +15,12 @@ import yaml
 from rk3588_mobile_sr.data_pipeline.clip_plan import (
     DEFAULT_GOP_CANDIDATES,
     DEFAULT_GOP_WEIGHTS,
+    DEFAULT_VAL_GOP,
     iter_encode_jobs,
+    iter_val_encode_jobs,
     load_train_sources,
+    load_val_rows,
+    merge_encode_jobs,
 )
 
 
@@ -48,8 +52,9 @@ def load_targets(root: Path, config_path: Path) -> BuildTargets:
     with config_path.open(encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
     train_manifest = root / cfg["train_manifest"]
+    val_manifest = root / cfg["val_manifest"]
     sources = load_train_sources(train_manifest)
-    jobs = iter_encode_jobs(
+    train_jobs = iter_encode_jobs(
         sources,
         clip_frames=cfg["clip_frames"],
         clips_per_video=cfg["clips_per_video"],
@@ -59,6 +64,17 @@ def load_targets(root: Path, config_path: Path) -> BuildTargets:
         gop_weights=cfg.get("gop_weights", DEFAULT_GOP_WEIGHTS),
         seed=cfg["seed"],
     )
+    val_jobs = (
+        iter_val_encode_jobs(
+            load_val_rows(val_manifest),
+            sources,
+            clip_frames=cfg["clip_frames"],
+            gop=int(cfg.get("val_gop", DEFAULT_VAL_GOP)),
+        )
+        if val_manifest.is_file()
+        else []
+    )
+    jobs = merge_encode_jobs(train_jobs, val_jobs)
     # Each HR lossless clip is shared across all codec jobs for that clip.
     hr_clip_n = len({(j["safe_id"], j["clip_start"]) for j in jobs})
     return BuildTargets(hr_clip=hr_clip_n, codec=len(jobs))
@@ -74,10 +90,11 @@ def count_outputs(root: Path, config_path: Path) -> BuildCounts:
     with config_path.open(encoding="utf-8") as handle:
         cfg = yaml.safe_load(handle)
     hr_dir = root / cfg["hr_dir"]
-    codec_dir = root / cfg["codec_cache_dir"]
+    raw_dir = root / cfg.get("raw_cache_dir", "data/raw_cache")
     return BuildCounts(
         hr_clip=_count_suffix_files(hr_dir, "_hr.mp4"),
-        codec=_count_suffix_files(codec_dir, ".mp4"),
+        # Final deliverable: LR + shared HR .npy (progress uses LR count ≈ job count).
+        codec=_count_suffix_files(raw_dir, "_lr.npy"),
     )
 
 

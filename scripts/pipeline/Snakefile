@@ -1,14 +1,13 @@
 """Snakemake DAG for offline codec cache (orchestration only; logic in data_pipeline package).
 
-Pipeline (still-image/DIV2K support removed, mezzanine CRF18 replaced by
-lossless HR clips, scale+encode merged into a single degrade+encode pass)::
+Pipeline::
 
     discover  -> train/val manifests (UVG YUV only)
     hr_clip   -> per-clip lossless H.264 HR (bit-exact with source YUV)
     degrade_and_encode -> mixed-kernel downsample + pre-compression noise
-                          + LR codec encode (single ffmpeg pass, no rgb24
-                          intermediate)
-    write_codec_manifest -> codec_cache/manifest.jsonl
+                          + LR codec encode (single ffmpeg pass)
+    decode_to_raw / decode_hr_to_raw -> LR/HR mp4 -> stacked RGB uint8 .npy
+    write_codec_manifest -> codec_cache/manifest.jsonl (path+hr_path → .npy)
 """
 
 from pathlib import Path
@@ -21,25 +20,32 @@ FFMPEG_DIR = PIPELINE_DIR / "ffmpeg"
 TRAIN_MANIFEST = config["train_manifest"]
 VAL_MANIFEST = config["val_manifest"]
 CODEC_CACHE = config["codec_cache_dir"]
+RAW_CACHE = config["raw_cache_dir"]
 HR_DIR = config["hr_dir"]
 MANIFEST_OUT = f"{CODEC_CACHE}/manifest.jsonl"
 
 from rk3588_mobile_sr.data_pipeline.clip_plan import (
     DEFAULT_GOP_CANDIDATES,
     DEFAULT_GOP_WEIGHTS,
+    DEFAULT_VAL_GOP,
     iter_encode_jobs,
+    iter_val_encode_jobs,
     load_train_sources,
+    load_val_rows,
+    merge_encode_jobs,
 )
-from rk3588_mobile_sr.data_pipeline.paths import hr_clip_path, lr_mp4_path
+from rk3588_mobile_sr.data_pipeline.paths import hr_raw_path, lr_raw_path
 
 _train_path = Path(TRAIN_MANIFEST)
+_val_path = Path(VAL_MANIFEST)
 if _train_path.is_file():
     SOURCES = load_train_sources(_train_path.resolve())
 else:
     SOURCES = []
+VAL_ROWS = load_val_rows(_val_path.resolve()) if _val_path.is_file() else []
 
 SOURCE_BY_SAFE = {source.safe_id(): source for source in SOURCES}
-JOBS = (
+_TRAIN_JOBS = (
     iter_encode_jobs(
         SOURCES,
         clip_frames=config["clip_frames"],
@@ -53,6 +59,17 @@ JOBS = (
     if SOURCES
     else []
 )
+_VAL_JOBS = (
+    iter_val_encode_jobs(
+        VAL_ROWS,
+        SOURCES,
+        clip_frames=config["clip_frames"],
+        gop=int(config.get("val_gop", DEFAULT_VAL_GOP)),
+    )
+    if SOURCES and VAL_ROWS
+    else []
+)
+JOBS = merge_encode_jobs(_TRAIN_JOBS, _VAL_JOBS)
 
 ENCODE_JOB_BY_KEY = {
     (
@@ -65,10 +82,10 @@ ENCODE_JOB_BY_KEY = {
     for job in JOBS
 }
 
-LR_TARGETS = [
+LR_RAW_TARGETS = [
     str(
-        lr_mp4_path(
-            Path(CODEC_CACHE),
+        lr_raw_path(
+            Path(RAW_CACHE),
             source_id=job["source_id"],
             clip_start=job["clip_start"],
             codec=job["codec"],
@@ -78,6 +95,20 @@ LR_TARGETS = [
     )
     for job in JOBS
 ]
+
+# HR .npy is shared across codecs for the same (source, clip).
+HR_RAW_TARGETS = sorted(
+    {
+        str(
+            hr_raw_path(
+                Path(RAW_CACHE),
+                source_id=job["source_id"],
+                clip_start=job["clip_start"],
+            )
+        )
+        for job in JOBS
+    }
+)
 
 
 def _source_path(safe_id: str) -> str:
@@ -141,22 +172,56 @@ rule degrade_and_encode:
         "--source-id {params.source_id} --clip-start {wildcards.clip}"
 
 
+rule decode_lr_to_raw:
+    input:
+        mp4=f"{CODEC_CACHE}/{{safe_id}}_s{{clip}}_g{{gop}}_{{codec}}_{{bitrate}}k.mp4",
+    output:
+        f"{RAW_CACHE}/{{safe_id}}_s{{clip}}_g{{gop}}_{{codec}}_{{bitrate}}k_lr.npy",
+    params:
+        clip_frames=lambda wildcards: _job(wildcards)["clip_frames"],
+        lr_w=config["lr_width"],
+        lr_h=config["lr_height"],
+    shell:
+        "uv run python -m rk3588_mobile_sr.data_pipeline.decode_to_raw "
+        "{input.mp4} {output} --width {params.lr_w} --height {params.lr_h} "
+        "--frames {params.clip_frames}"
+
+
+rule decode_hr_to_raw:
+    """Bake lossless HR mp4 -> RGB .npy (same format as LR; shared across codecs)."""
+    input:
+        mp4=f"{HR_DIR}/{{safe_id}}_s{{clip}}_hr.mp4",
+    output:
+        f"{RAW_CACHE}/{{safe_id}}_s{{clip}}_hr.npy",
+    params:
+        clip_frames=config["clip_frames"],
+        width=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id].width,
+        height=lambda wildcards: SOURCE_BY_SAFE[wildcards.safe_id].height,
+    shell:
+        "uv run python -m rk3588_mobile_sr.data_pipeline.decode_to_raw "
+        "{input.mp4} {output} --width {params.width} --height {params.height} "
+        "--frames {params.clip_frames}"
+
+
 rule write_codec_manifest:
     input:
         train=TRAIN_MANIFEST,
-        lr=LR_TARGETS,
+        lr=LR_RAW_TARGETS,
+        hr=HR_RAW_TARGETS,
     output:
         manifest=MANIFEST_OUT,
     shell:
         "uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest "
         f"--root . --train-manifest {config['train_manifest']} "
+        f"--val-manifest {config['val_manifest']} "
         f"--output {config['codec_cache_dir']}/manifest.jsonl "
-        f"--cache-dir {config['codec_cache_dir']} --hr-dir {config['hr_dir']} "
+        f"--raw-cache-dir {config['raw_cache_dir']} "
         f"--clip-frames {config['clip_frames']} --clips-per-video {config['clips_per_video']} "
         f"--codecs {' '.join(config['codecs'])} "
         f"--bitrates {' '.join(str(b) for b in config['bitrates_kbps'])} "
         f"--gop-candidates {' '.join(str(g) for g in config.get('gop_candidates', DEFAULT_GOP_CANDIDATES))} "
         f"--gop-weights {' '.join(str(w) for w in config.get('gop_weights', DEFAULT_GOP_WEIGHTS))} "
+        f"--val-gop {config.get('val_gop', DEFAULT_VAL_GOP)} "
         f"--seed {config['seed']} "
         f"--lr-height {config['lr_height']} --lr-width {config['lr_width']}"
 

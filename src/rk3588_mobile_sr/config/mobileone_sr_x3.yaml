@@ -16,8 +16,7 @@ data:
   nv12_simulate: true
   augment: true
   decode: "auto"
-  dali_num_threads: 4
-  dali_initial_fill: 32
+  decode_num_workers: 4
   prefetch_batches: 4
 
 stage1:
@@ -25,7 +24,7 @@ stage1:
   batch_size: 16
   max_steps: 100000
   early_stop_patience: 10
-  early_stop_min_delta: 0.01
+  early_stop_min_delta: 0.1
   val_every: 1000
   lr: 1.0e-3
   loss: "l1"

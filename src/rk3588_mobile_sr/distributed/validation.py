@@ -17,6 +17,7 @@ from rk3588_mobile_sr.utils.model_diagnostics import check_deploy_consistency
 from rk3588_mobile_sr.utils.run_logger import logger
 from rk3588_mobile_sr.utils.sr_metrics import ValidationMetrics, validate_ddp, validate_ddp_extended
 from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, log_validation_sr_images
+from rk3588_mobile_sr.utils.vmaf_metric import DEFAULT_VMAF_MODEL
 
 
 @dataclass
@@ -24,9 +25,13 @@ class ValidationConfig:
     scale: int = 3
     extended: bool = True
     compute_dists: bool = False
+    compute_vmaf: bool = True
+    vmaf_model: str = DEFAULT_VMAF_MODEL
+    # Encode-side CAMBI size (H, W) for VMAF v1; LR canvas before SR display.
+    vmaf_enc_size: tuple[int, int] | None = (360, 640)
     log_images: bool = True
     deploy_check: bool = True
-    vis_samples: int = 4
+    vis_samples: int = 8
     vis_max_size: int = 768
     colorspace: str = "rgb"
     data_preview: bool = True
@@ -36,21 +41,30 @@ class ValidationConfig:
 class EarlyStopState:
     enabled: bool = False
     patience: int = 8
-    min_delta: float = 0.005
-    best_psnr: float = -1.0
+    min_delta: float = 0.1
+    best_score: float = -1.0
     patience_counter: int = 0
 
-    def update(self, psnr: float) -> tuple[bool, bool]:
-        """Return (improved, should_stop)."""
+    # Backward-compatible alias used by older tests / logs.
+    @property
+    def best_psnr(self) -> float:
+        return self.best_score
+
+    @best_psnr.setter
+    def best_psnr(self, value: float) -> None:
+        self.best_score = value
+
+    def update(self, score: float) -> tuple[bool, bool]:
+        """Return (improved, should_stop). Higher score is better (VMAF / PSNR)."""
         if not self.enabled:
-            improved = psnr > self.best_psnr
+            improved = score > self.best_score
             if improved:
-                self.best_psnr = psnr
+                self.best_score = score
             return improved, False
 
-        improved = psnr > self.best_psnr + self.min_delta
+        improved = score > self.best_score + self.min_delta
         if improved:
-            self.best_psnr = psnr
+            self.best_score = score
             self.patience_counter = 0
         else:
             self.patience_counter += 1
@@ -61,11 +75,16 @@ class EarlyStopState:
 @dataclass
 class ValidationResult:
     step: int
-    psnr: float
+    score: float
     val_metrics: ValidationMetrics | None
     improved: bool
     should_stop: bool
     metrics: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def psnr(self) -> float:
+        """Legacy alias: primary score (VMAF when enabled)."""
+        return self.score
 
 
 @dataclass
@@ -87,17 +106,20 @@ class ValidationRunner:
             logger.info("Step {} validation started", step)
 
         if self.config.extended:
-            psnr, val_metrics = validate_ddp_extended(
+            score, val_metrics = validate_ddp_extended(
                 self.model,
                 self.val_loader,
                 self.ctx.rank,
                 self.ctx.world_size,
                 scale=self.config.scale,
                 compute_dists=self.config.compute_dists,
+                compute_vmaf=self.config.compute_vmaf,
+                vmaf_model=self.config.vmaf_model,
+                vmaf_enc_size=self.config.vmaf_enc_size,
                 colorspace=self.config.colorspace,
             )
         else:
-            psnr = validate_ddp(
+            score = validate_ddp(
                 self.model,
                 self.val_loader,
                 self.ctx.rank,
@@ -106,21 +128,29 @@ class ValidationRunner:
             )
             val_metrics = None
 
-        improved, should_stop = self.early_stop.update(psnr)
+        improved, should_stop = self.early_stop.update(score)
         result = ValidationResult(
             step=step,
-            psnr=psnr,
+            score=score,
             val_metrics=val_metrics,
             improved=improved,
             should_stop=should_stop,
         )
 
         def _main_hooks() -> None:
-            metrics: dict[str, float] = {"val/best_psnr": self.early_stop.best_psnr}
+            primary_key = (
+                "val/vmaf"
+                if self.config.compute_vmaf and val_metrics is not None and val_metrics.vmaf is not None
+                else "val/psnr"
+            )
+            metrics: dict[str, float] = {
+                "val/best_score": self.early_stop.best_score,
+                "val/best_psnr": self.early_stop.best_score,  # legacy SwanLab key
+            }
             if val_metrics is not None:
                 metrics.update(val_metrics.to_log_dict())
             else:
-                metrics["val/psnr"] = psnr
+                metrics[primary_key] = score
             if self.early_stop.enabled:
                 metrics["early_stop/patience"] = self.early_stop.patience_counter
 
@@ -152,7 +182,12 @@ class ValidationRunner:
             stop_msg = " | early stop" if should_stop else ""
             detail = ""
             if val_metrics is not None:
-                detail = f" | Y-PSNR={val_metrics.y_psnr:.2f} | SSIM={val_metrics.ssim:.4f}"
+                detail = (
+                    f" | PSNR={val_metrics.psnr:.2f} | Y-PSNR={val_metrics.y_psnr:.2f} "
+                    f"| SSIM={val_metrics.ssim:.4f}"
+                )
+                if val_metrics.vmaf is not None:
+                    detail = f" | VMAF={val_metrics.vmaf:.2f}" + detail
                 if val_metrics.dists is not None:
                     detail += f" | DISTS={val_metrics.dists:.4f}"
             patience_note = ""
@@ -160,12 +195,14 @@ class ValidationRunner:
                 patience_note = (
                     f" | patience={self.early_stop.patience_counter}/{self.early_stop.patience}"
                 )
+            label = "VMAF" if primary_key == "val/vmaf" else "PSNR"
             logger.info(
-                "Step {} | val PSNR={:.2f}{} | best={:.2f}{}{}",
+                "Step {} | val {}={:.2f}{} | best={:.2f}{}{}",
                 step,
-                psnr,
+                label,
+                score,
                 detail,
-                self.early_stop.best_psnr,
+                self.early_stop.best_score,
                 patience_note,
                 stop_msg,
             )

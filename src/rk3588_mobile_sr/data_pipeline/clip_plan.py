@@ -4,6 +4,10 @@ Still-image sources have been removed: every job is a temporal YUV clip. GOP
 and bitrate are now *sampled* from realistic distributions (log-normal bitrate,
 weighted GOP candidates) instead of a uniform cartesian product, so the cache
 matches the bitrate/GOP skew of real streamed video.
+
+Fixed validation rows (``val_fixed.jsonl``) additionally get dedicated encode
+jobs so every ``(sequence, codec, bitrate)`` canvas is covered at the val
+``clip_start`` / ``frame_index`` — train sampling alone does not guarantee that.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import math
 import random
 from pathlib import Path
 
-from rk3588_mobile_sr.data_pipeline.schemas import SourceRow
+from rk3588_mobile_sr.data_pipeline.schemas import SourceRow, ValRow
 
 # Real-world video bitrate is roughly log-normal with a long tail toward low
 # rates. Per-codec center (kbps) reflects that x265/AV1 deliver comparable
@@ -25,6 +29,8 @@ _BITRATE_LOG_SIGMA = 0.35
 # dominate live/conferencing, longer GOPs are typical for VoD streaming.
 DEFAULT_GOP_CANDIDATES = [30, 60, 120]
 DEFAULT_GOP_WEIGHTS = [0.4, 0.4, 0.2]
+# Deterministic GOP for fixed-val bake jobs (must cover val frame_index).
+DEFAULT_VAL_GOP = 30
 
 
 def load_train_sources(manifest_path: Path) -> list[SourceRow]:
@@ -35,6 +41,17 @@ def load_train_sources(manifest_path: Path) -> list[SourceRow]:
             if not line:
                 continue
             rows.append(SourceRow.from_json(json.loads(line)))
+    return rows
+
+
+def load_val_rows(manifest_path: Path) -> list[ValRow]:
+    rows: list[ValRow] = []
+    with manifest_path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(ValRow.model_validate(json.loads(line)))
     return rows
 
 
@@ -96,6 +113,16 @@ def _sample_gop(
     return rng.choices(candidates, weights=w, k=1)[0]
 
 
+def _job_key(job: dict) -> tuple:
+    return (
+        job["safe_id"],
+        job["clip_start"],
+        job["gop"],
+        job["codec"],
+        job["bitrate"],
+    )
+
+
 def iter_encode_jobs(
     sources: list[SourceRow],
     *,
@@ -138,6 +165,70 @@ def iter_encode_jobs(
                         "encode_mode": "temporal_gop",
                         "source_type": "yuv_video",
                         "fps": source.fps or 30,
+                        "role": "train",
                     }
                 )
     return jobs
+
+
+def iter_val_encode_jobs(
+    val_rows: list[ValRow],
+    sources: list[SourceRow],
+    *,
+    clip_frames: int,
+    gop: int = DEFAULT_VAL_GOP,
+) -> list[dict]:
+    """Dedicated encode jobs covering every fixed-val ``(seq, codec, bitrate)``.
+
+    Uses each val row's ``clip_start`` so ``frame_index`` falls inside the baked
+    window (``clip_start <= frame_index < clip_start + clip_frames``).
+    """
+    source_by_id = {source.id: source for source in sources}
+    jobs: list[dict] = []
+    seen: set[tuple] = set()
+    for row in val_rows:
+        source_id = row.id.rsplit("@", 2)[0]
+        source = source_by_id.get(source_id)
+        if source is None:
+            raise KeyError(
+                f"val row {row.id!r} references unknown source {source_id!r}; "
+                "rebuild train.jsonl / val_fixed.jsonl together"
+            )
+        if not (row.clip_start <= row.frame_index < row.clip_start + clip_frames):
+            raise ValueError(
+                f"val row {row.id!r}: frame_index={row.frame_index} outside "
+                f"[{row.clip_start}, {row.clip_start + clip_frames})"
+            )
+        job = {
+            "safe_id": source.safe_id(),
+            "source_id": source.id,
+            "clip_start": row.clip_start,
+            "clip_frames": clip_frames,
+            "gop": gop,
+            "codec": row.codec,
+            "bitrate": row.bitrate_kbps,
+            "encode_mode": "temporal_gop",
+            "source_type": "yuv_video",
+            "fps": source.fps or row.fps or 30,
+            "role": "val",
+        }
+        key = _job_key(job)
+        if key in seen:
+            continue
+        seen.add(key)
+        jobs.append(job)
+    return jobs
+
+
+def merge_encode_jobs(*job_lists: list[dict]) -> list[dict]:
+    """Concatenate encode job lists, dropping duplicate bake keys."""
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+    for jobs in job_lists:
+        for job in jobs:
+            key = _job_key(job)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(job)
+    return merged

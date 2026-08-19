@@ -31,7 +31,9 @@ class ValidationMetrics:
     psnr_p50: float
     psnr_p90: float
     dists: float | None = None
+    vmaf: float | None = None
     fixed_psnr: dict[str, float] = field(default_factory=dict)
+    fixed_vmaf: dict[str, float] = field(default_factory=dict)
 
     def to_log_dict(self) -> dict[str, float]:
         metrics: dict[str, float] = {
@@ -46,8 +48,12 @@ class ValidationMetrics:
         }
         if self.dists is not None:
             metrics["val/dists"] = self.dists
+        if self.vmaf is not None:
+            metrics["val/vmaf"] = self.vmaf
         for slug, psnr in self.fixed_psnr.items():
             metrics[f"val/fixed_{slug}_psnr"] = psnr
+        for slug, score in self.fixed_vmaf.items():
+            metrics[f"val/fixed_{slug}_vmaf"] = score
         return metrics
 
 
@@ -126,11 +132,12 @@ def _rank_sample_indices(val_loader: DataLoader) -> list[int]:
 
 
 def _aggregate_per_sample(
-    records: list[tuple[int, float, float, float, float, float]],
+    records: list[tuple[int, float, float, float, float, float, float]],
     *,
     fixed_indices: tuple[int, ...],
     specs: list | None,
     has_dists: bool,
+    has_vmaf: bool,
 ) -> ValidationMetrics:
     if not records:
         return ValidationMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -141,17 +148,21 @@ def _aggregate_per_sample(
     ssims = np.array([row[3] for row in records], dtype=np.float64)
     l1s = np.array([row[4] for row in records], dtype=np.float64)
     dists_vals = np.array([row[5] for row in records], dtype=np.float64) if has_dists else None
+    vmaf_vals = np.array([row[6] for row in records], dtype=np.float64) if has_vmaf else None
 
-    by_index = {row[0]: row[1] for row in records}
+    by_index_psnr = {row[0]: row[1] for row in records}
+    by_index_vmaf = {row[0]: row[6] for row in records} if has_vmaf else {}
     fixed_psnr: dict[str, float] = {}
+    fixed_vmaf: dict[str, float] = {}
     for idx in fixed_indices:
-        if idx not in by_index:
-            continue
         if specs is not None and 0 <= idx < len(specs):
             slug = val_spec_slug(specs[idx])
         else:
             slug = str(idx)
-        fixed_psnr[slug] = by_index[idx]
+        if idx in by_index_psnr:
+            fixed_psnr[slug] = by_index_psnr[idx]
+        if idx in by_index_vmaf:
+            fixed_vmaf[slug] = by_index_vmaf[idx]
 
     return ValidationMetrics(
         psnr=float(psnrs.mean()),
@@ -163,7 +174,9 @@ def _aggregate_per_sample(
         psnr_p50=float(np.percentile(psnrs, 50)),
         psnr_p90=float(np.percentile(psnrs, 90)),
         dists=float(dists_vals.mean()) if dists_vals is not None else None,
+        vmaf=float(vmaf_vals.mean()) if vmaf_vals is not None else None,
         fixed_psnr=fixed_psnr,
+        fixed_vmaf=fixed_vmaf,
     )
 
 
@@ -186,10 +199,14 @@ def validate_ddp_extended(
     fixed_indices: tuple[int, ...] | None = None,
     fixed_tracks: int = DEFAULT_FIXED_VAL_TRACKS,
     compute_dists: bool = False,
+    compute_vmaf: bool = True,
+    vmaf_model: str = "1080p",
+    vmaf_enc_size: tuple[int, int] | None = (360, 640),
     colorspace: str = "rgb",
 ) -> tuple[float, ValidationMetrics | None]:
-    """Run full validation; all ranks receive mean PSNR, rank 0 also gets full metrics."""
+    """Run full validation; primary score is VMAF when enabled, else PSNR."""
     from rk3588_mobile_sr.utils.pyiqa_metric import batch_perceptual_metric
+    from rk3588_mobile_sr.utils.vmaf_metric import batch_vmaf
 
     dataset = val_loader.dataset
     specs = dataset.specs if isinstance(dataset, FixedValDataset) else None
@@ -208,8 +225,9 @@ def validate_ddp_extended(
     device = torch.device(f"cuda:{rank}")
     shave = scale
     sample_indices = _rank_sample_indices(val_loader)
-    local_records: list[tuple[int, float, float, float, float, float]] = []
+    local_records: list[tuple[int, float, float, float, float, float, float]] = []
     offset = 0
+    enc_h, enc_w = vmaf_enc_size if vmaf_enc_size is not None else (None, None)
 
     for lr, hr in iter_val_batches(val_loader):
         lr = lr.to(device, non_blocking=True)
@@ -227,13 +245,37 @@ def validate_ddp_extended(
                 if compute_dists
                 else None
             )
+            vmaf_b = (
+                batch_vmaf(
+                    out_rgb.cpu(),
+                    hr_rgb.cpu(),
+                    model=vmaf_model,
+                    enc_width=enc_w,
+                    enc_height=enc_h,
+                )
+                if compute_vmaf
+                else None
+            )
         else:
+            out_rgb = out
+            hr_rgb = hr
             psnr_b = batch_psnr(out, hr, shave=shave)
             y_psnr_b = batch_y_psnr(out, hr, shave=shave)
             l1_b = batch_l1(out, hr, shave=shave)
             dists_b = (
                 batch_perceptual_metric(out, hr, device=device, shave=shave)
                 if compute_dists
+                else None
+            )
+            vmaf_b = (
+                batch_vmaf(
+                    out_rgb.cpu(),
+                    hr_rgb.cpu(),
+                    model=vmaf_model,
+                    enc_width=enc_w,
+                    enc_height=enc_h,
+                )
+                if compute_vmaf
                 else None
             )
 
@@ -250,6 +292,7 @@ def validate_ddp_extended(
                 hr_np = hr[i].detach().float().cpu().permute(1, 2, 0).numpy()
             ssim_val = ssim_rgb(sr_np, hr_np, shave=shave)
             dists_val = float(dists_b[i].item()) if dists_b is not None else 0.0
+            vmaf_val = float(vmaf_b[i].item()) if vmaf_b is not None else 0.0
             local_records.append(
                 (
                     global_idx,
@@ -258,6 +301,7 @@ def validate_ddp_extended(
                     ssim_val,
                     float(l1_b[i].item()),
                     dists_val,
+                    vmaf_val,
                 )
             )
 
@@ -265,7 +309,7 @@ def validate_ddp_extended(
         unwrap.train()
 
     if world_size > 1:
-        gathered: list[list[tuple[int, float, float, float, float, float]] | None] = [
+        gathered: list[list[tuple[int, float, float, float, float, float, float]] | None] = [
             None
         ] * world_size
         dist.all_gather_object(gathered, local_records)
@@ -273,9 +317,9 @@ def validate_ddp_extended(
         gathered = [local_records]
 
     metrics: ValidationMetrics | None = None
-    psnr = 0.0
+    primary = 0.0
     if rank == 0:
-        merged: list[tuple[int, float, float, float, float, float]] = []
+        merged: list[tuple[int, float, float, float, float, float, float]] = []
         for part in gathered:
             if part:
                 merged.extend(part)
@@ -284,11 +328,16 @@ def validate_ddp_extended(
             fixed_indices=fixed_indices,
             specs=specs,
             has_dists=compute_dists,
+            has_vmaf=compute_vmaf,
         )
-        psnr = metrics.psnr
+        primary = (
+            float(metrics.vmaf)
+            if compute_vmaf and metrics.vmaf is not None
+            else metrics.psnr
+        )
 
-    psnr = _broadcast_scalar(psnr, rank, world_size, device)
-    return psnr, metrics
+    primary = _broadcast_scalar(primary, rank, world_size, device)
+    return primary, metrics
 
 
 @torch.no_grad()
@@ -300,8 +349,8 @@ def validate_ddp(
     *,
     scale: int = 3,
 ) -> float:
-    """Evaluate mean RGB PSNR on the validation set (DDP-safe, border shave)."""
-    psnr, _ = validate_ddp_extended(
+    """Evaluate mean primary val score (VMAF by default) on the validation set."""
+    score, _ = validate_ddp_extended(
         model,
         val_loader,
         rank,
@@ -309,4 +358,4 @@ def validate_ddp(
         scale=scale,
         fixed_indices=(),
     )
-    return psnr
+    return score

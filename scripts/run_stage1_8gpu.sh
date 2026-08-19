@@ -36,7 +36,8 @@ run_torchrun "$NPROC" -m rk3588_mobile_sr.train.stage1 \
   --log_every 500 \
   --lr 1e-3 \
   --early_stop_patience 10 \
-  --early_stop_min_delta 0.01 \
+  --early_stop_min_delta 0.1 \
+  --vmaf_model 1080p \
   --swanlab_project rk3588-mobile-sr \
   --swanlab_experiment "$EXP_NAME" \
   ${EXTRA_ARGS:-} \

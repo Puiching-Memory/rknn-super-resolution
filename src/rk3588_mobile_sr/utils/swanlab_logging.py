@@ -545,8 +545,6 @@ class DataPreviewSample:
     meta: ValSampleMeta
     panel: np.ndarray
     stats: dict[str, float]
-    lr_video: Path | None = None
-    hr_video: Path | None = None
 
 
 def collect_data_preview_samples(
@@ -582,9 +580,6 @@ def collect_data_preview_samples(
             lr_size=(lr_h, lr_w),
             hr_size=(hr_h, hr_w),
         )
-        clip_paths = dataset.codec_clip_paths_for_index(index)
-        lr_video = clip_paths[0] if clip_paths else None
-        hr_video = clip_paths[1] if clip_paths else None
         samples.append(
             DataPreviewSample(
                 meta=meta,
@@ -596,8 +591,6 @@ def collect_data_preview_samples(
                     "colorspace_roundtrip_mean_abs": roundtrip_stats["mean_abs"],
                     "colorspace_roundtrip_max_abs": roundtrip_stats["max_abs"],
                 },
-                lr_video=lr_video,
-                hr_video=hr_video,
             )
         )
     return samples
@@ -608,28 +601,6 @@ def _save_preview_png(panel: np.ndarray, path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(panel).save(path)
-
-
-def _append_codec_clip_videos(
-    payload: dict[str, Any],
-    *,
-    key_prefix: str,
-    slug: str,
-    lr_video: Path | None,
-    hr_video: Path | None,
-    caption: str,
-) -> None:
-    """Attach LR/HR codec MP4 paths to a SwanLab log payload."""
-    if lr_video is not None and lr_video.is_file():
-        payload[f"{key_prefix}/{slug}/lr_clip"] = swanlab.Video(
-            str(lr_video),
-            caption=f"{caption}\nLR codec clip",
-        )
-    if hr_video is not None and hr_video.is_file():
-        payload[f"{key_prefix}/{slug}/hr_clip"] = swanlab.Video(
-            str(hr_video),
-            caption=f"{caption}\nHR lossless clip",
-        )
 
 
 def log_data_preview_samples(
@@ -680,14 +651,6 @@ def log_data_preview_samples(
                 sample.panel,
                 caption=caption,
                 size=max_size,
-            )
-            _append_codec_clip_videos(
-                payload,
-                key_prefix="data_preview",
-                slug=sample.meta.slug,
-                lr_video=sample.lr_video,
-                hr_video=sample.hr_video,
-                caption=header,
             )
         swanlab.log(payload, step=step)
         log_metrics(aggregate, step=step)
@@ -742,8 +705,6 @@ def run_training_data_preview(
 class ValVisSample:
     meta: ValSampleMeta
     panel: np.ndarray
-    lr_video: Path | None = None
-    hr_video: Path | None = None
 
 
 @torch.no_grad()
@@ -788,17 +749,7 @@ def collect_codec_val_vis_samples(
             error_gain=error_gain,
             include_detail=include_detail,
         )
-        clip_paths = dataset.codec_clip_paths_for_index(index)
-        lr_video = clip_paths[0] if clip_paths else None
-        hr_video = clip_paths[1] if clip_paths else None
-        samples.append(
-            ValVisSample(
-                meta=meta,
-                panel=panel,
-                lr_video=lr_video,
-                hr_video=hr_video,
-            )
-        )
+        samples.append(ValVisSample(meta=meta, panel=panel))
 
     if was_training:
         unwrap.train()
@@ -852,16 +803,39 @@ def collect_sr_validation_panels(
     return panels
 
 
+def save_val_vis_samples(
+    samples: list[ValVisSample],
+    save_dir: Path,
+    *,
+    subdir: str = "sr_preview",
+) -> Path:
+    """Write LR|SR|HR panels to ``{save_dir}/{subdir}/{slug}.png``."""
+    preview_dir = Path(save_dir) / subdir
+    for sample in samples:
+        _save_preview_png(sample.panel, preview_dir / f"{sample.meta.slug}.png")
+    return preview_dir
+
+
 def log_val_vis_samples(
     samples: list[ValVisSample],
     *,
     step: int,
     max_size: int = 768,
     include_detail: bool = True,
-) -> None:
-    """Upload codec-canvas validation panels to SwanLab with per-sample keys."""
+    key_prefix: str = "val",
+    save_dir: Path | None = None,
+    save_subdir: str = "sr_preview",
+) -> Path | None:
+    """Upload codec-canvas validation panels to SwanLab with per-sample keys.
+
+    When ``save_dir`` is set, also write PNGs under ``{save_dir}/{save_subdir}/``.
+    """
+    preview_dir: Path | None = None
+    if save_dir is not None and samples:
+        preview_dir = save_val_vis_samples(samples, save_dir, subdir=save_subdir)
+
     if not _active or not samples:
-        return
+        return preview_dir
 
     detail_note = (
         "\nerr(codec LR↑) | err(SR) | zoom(SR|HR)@max-error"
@@ -871,20 +845,13 @@ def log_val_vis_samples(
     payload: dict[str, Any] = {}
     for sample in samples:
         caption = sample.meta.caption() + detail_note
-        payload[f"val/{sample.meta.slug}"] = swanlab.Image(
+        payload[f"{key_prefix}/{sample.meta.slug}"] = swanlab.Image(
             sample.panel,
             caption=caption,
             size=max_size,
         )
-        _append_codec_clip_videos(
-            payload,
-            key_prefix="val",
-            slug=sample.meta.slug,
-            lr_video=sample.lr_video,
-            hr_video=sample.hr_video,
-            caption=sample.meta.caption(),
-        )
     swanlab.log(payload, step=step)
+    return preview_dir
 
 
 def log_sr_panels(
@@ -927,6 +894,9 @@ def log_validation_sr_images(
     error_gain: float = 8.0,
     include_detail: bool = True,
     colorspace: str = "rgb",
+    save_dir: Path | None = None,
+    key_prefix: str = "val",
+    save_subdir: str = "sr_preview",
 ) -> None:
     """Collect and upload validation visualizations to SwanLab."""
     dataset = val_loader.dataset
@@ -946,6 +916,9 @@ def log_validation_sr_images(
             step=step,
             max_size=max_size,
             include_detail=include_detail,
+            key_prefix=key_prefix,
+            save_dir=save_dir,
+            save_subdir=save_subdir,
         )
         return
 
@@ -964,3 +937,71 @@ def log_validation_sr_images(
         max_size=max_size,
         include_detail=include_detail,
     )
+
+
+def run_final_sr_preview(
+    model: nn.Module,
+    val_loader: DataLoader,
+    device: torch.device,
+    *,
+    colorspace: str,
+    num_samples: int = 8,
+    max_size: int = 768,
+    save_dir: Path,
+    step: int = 0,
+    checkpoint: Path | None = None,
+) -> Path | None:
+    """After training, write LR|SR|HR panels under ``{save_dir}/sr_preview``.
+
+    Prefers ``checkpoint`` (usually ``best.pth``) when present so the panels
+    reflect the best validation weights rather than the last step.
+    """
+    from rk3588_mobile_sr.utils.train_framework import (
+        _normalize_state_dict,
+        _training_module_for_state_dict,
+    )
+
+    dataset = val_loader.dataset
+    if not isinstance(dataset, FixedValDataset):
+        logger.warning("final sr preview skipped: val loader is not FixedValDataset")
+        return None
+
+    unwrap = _training_module_for_state_dict(model)
+    if checkpoint is not None and checkpoint.is_file():
+        raw = torch.load(checkpoint, map_location=device, weights_only=False)
+        if isinstance(raw, dict) and "state_dict" in raw:
+            state = _normalize_state_dict(raw["state_dict"])
+            ckpt_step = int(raw.get("step", step))
+        elif isinstance(raw, dict):
+            state = _normalize_state_dict(raw)
+            ckpt_step = step
+        else:
+            raise TypeError(f"Unsupported checkpoint format: {checkpoint}")
+        unwrap.load_state_dict(state, strict=True)
+        step = ckpt_step
+        logger.info("final sr preview loading {}", checkpoint)
+
+    indices = select_val_vis_indices(dataset.specs, num_samples)
+    samples = collect_codec_val_vis_samples(
+        model,
+        dataset,
+        device,
+        indices=indices,
+        colorspace=colorspace,
+    )
+    preview_dir = log_val_vis_samples(
+        samples,
+        step=step,
+        max_size=max_size,
+        key_prefix="sr_preview",
+        save_dir=save_dir,
+        save_subdir="sr_preview",
+    )
+    if preview_dir is not None:
+        logger.info(
+            "final sr preview ({} samples @ step {}): {}",
+            len(samples),
+            step,
+            preview_dir,
+        )
+    return preview_dir

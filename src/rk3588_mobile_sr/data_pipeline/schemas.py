@@ -77,7 +77,7 @@ class CodecClipRow(BaseModel):
     lr_width: int
     encode_mode: Literal["intra_only", "temporal_gop"]
     tags: list[str] = Field(default_factory=lambda: ["codec_offline"])
-    hr_mp4_path: str
+    hr_path: str  # offline-baked HR RGB .npy (same format as path/LR)
 
     def to_json(self) -> dict[str, Any]:
         return self.model_dump()

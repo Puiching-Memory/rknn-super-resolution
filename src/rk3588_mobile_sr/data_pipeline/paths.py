@@ -25,3 +25,29 @@ def lr_mp4_path(
 ) -> Path:
     name = f"{safe_source_id(source_id)}_s{clip_start}_g{gop}_{codec}_{bitrate_kbps}k.mp4"
     return cache_dir / name
+
+
+def lr_raw_path(
+    raw_dir: Path,
+    *,
+    source_id: str,
+    clip_start: int,
+    codec: str,
+    bitrate_kbps: int,
+    gop: int,
+) -> Path:
+    """Path to the offline-baked LR RGB uint8 .npy clip."""
+    name = (
+        f"{safe_source_id(source_id)}_s{clip_start}_g{gop}_{codec}_{bitrate_kbps}k_lr.npy"
+    )
+    return raw_dir / name
+
+
+def hr_raw_path(
+    raw_dir: Path,
+    *,
+    source_id: str,
+    clip_start: int,
+) -> Path:
+    """Path to the offline-baked HR RGB uint8 .npy clip (shared across codecs)."""
+    return raw_dir / f"{safe_source_id(source_id)}_s{clip_start}_hr.npy"

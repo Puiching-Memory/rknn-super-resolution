@@ -99,6 +99,10 @@ data/scaled_cache/
 # Experiment tracking
 wandb/
 
+# Local Netflix libvmaf install + clone (see ./scripts/setup_vmaf.sh)
+.local/
+third_party/vmaf/
+
 # OS files
 .DS_Store
 Thumbs.db

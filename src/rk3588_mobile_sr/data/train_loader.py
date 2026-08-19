@@ -1,26 +1,24 @@
-"""Canvas codec training loader (DALI NVDEC only)."""
+"""Canvas codec training loader (offline LR/HR .npy, pure CPU mmap)."""
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 
-import nvidia.dali.fn as fn
-import nvidia.dali.types as types
+import numpy as np
 import torch
 import torch.nn.functional as F
-from nvidia.dali import pipeline_def
-from nvidia.dali.plugin.pytorch import DALIGenericIterator, LastBatchPolicy
 
 from rk3588_mobile_sr.data.augment import (
     augment_config_for_canvas,
     batch_augment_pair,
     batch_random_crop_pair,
+    sample_lr_crop_xy,
 )
-from rk3588_mobile_sr.data.codec_index import build_codec_frame_index
+from rk3588_mobile_sr.data.codec_index import CodecFrameEntry, build_codec_frame_index
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_model_colorspace
 
 
@@ -50,28 +48,40 @@ def apply_canvas_batch_transform(
     augment_rot90: bool = False,
     augment_lr_decode_noise: bool = False,
     augment_lr_jpeg: bool = False,
+    pre_cropped: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Resize, optionally crop, augment, and convert decoded RGB batches."""
-    lr = uint8_bchw_to_float(lr).to(device, non_blocking=True)
-    hr = uint8_bchw_to_float(hr).to(device, non_blocking=True)
+    """Resize, optionally crop on CPU, then augment/colorspace on ``device``.
+
+    When ``pre_cropped=True``, ``lr``/``hr`` are already patch-sized and the
+    random-crop step is skipped.
+    """
+    lr = uint8_bchw_to_float(lr)
+    hr = uint8_bchw_to_float(hr)
 
     lr_h, lr_w = lr_size
     hr_h, hr_w = hr_size
-    if hr.shape[-2] != hr_h or hr.shape[-1] != hr_w:
-        hr = F.interpolate(hr, size=(hr_h, hr_w), mode="area")
-    if lr.shape[-2] != lr_h or lr.shape[-1] != lr_w:
-        lr = F.interpolate(lr, size=(lr_h, lr_w), mode="area")
+    if not pre_cropped:
+        if hr.shape[-2] != hr_h or hr.shape[-1] != hr_w:
+            hr = F.interpolate(hr, size=(hr_h, hr_w), mode="area")
+        if lr.shape[-2] != lr_h or lr.shape[-1] != lr_w:
+            lr = F.interpolate(lr, size=(lr_h, lr_w), mode="area")
 
-    if patch_size is not None:
-        lr, hr = batch_random_crop_pair(
-            lr,
-            hr,
-            lr_crop_h=patch_size,
-            lr_crop_w=patch_size,
-            scale=scale,
-        )
+        if patch_size is not None:
+            lr, hr = batch_random_crop_pair(
+                lr,
+                hr,
+                lr_crop_h=patch_size,
+                lr_crop_w=patch_size,
+                scale=scale,
+            )
+            lr_h = lr_w = patch_size
+            hr_h = hr_w = patch_size * scale
+    elif patch_size is not None:
         lr_h = lr_w = patch_size
         hr_h = hr_w = patch_size * scale
+
+    lr = lr.to(device, non_blocking=True)
+    hr = hr.to(device, non_blocking=True)
 
     if augment:
         lr, hr = batch_augment_pair(
@@ -93,170 +103,11 @@ def apply_canvas_batch_transform(
     return lr, hr
 
 
-def nvidia_cuvid_available() -> bool:
-    """Return True when libnvcuvid is loadable (required by DALI VideoReader)."""
-    path = ctypes.util.find_library("nvcuvid")
-    if path:
-        try:
-            ctypes.CDLL(path)
-            return True
-        except OSError:
-            pass
-    for name in ("libnvcuvid.so.1", "libnvcuvid.so"):
-        try:
-            ctypes.CDLL(name)
-            return True
-        except OSError:
-            continue
-    return False
-
-
-@pipeline_def
-def _codec_pair_pipeline(
-    lr_file_list: str,
-    hr_file_list: str,
-    *,
-    shard_id: int,
-    num_shards: int,
-    initial_fill: int,
-    reader_seed: int,
-):
-    lr, _lr_lbl = fn.readers.video(
-        device="gpu",
-        name="lr_reader",
-        file_list=lr_file_list,
-        sequence_length=1,
-        shard_id=shard_id,
-        num_shards=num_shards,
-        random_shuffle=False,
-        initial_fill=initial_fill,
-        file_list_frame_num=True,
-        enable_frame_num="none",
-        enable_timestamps=False,
-        dtype=types.UINT8,
-        seed=reader_seed,
-    )
-    hr, _hr_lbl = fn.readers.video(
-        device="gpu",
-        name="hr_reader",
-        file_list=hr_file_list,
-        sequence_length=1,
-        shard_id=shard_id,
-        num_shards=num_shards,
-        random_shuffle=False,
-        initial_fill=initial_fill,
-        file_list_frame_num=True,
-        enable_frame_num="none",
-        enable_timestamps=False,
-        dtype=types.UINT8,
-        seed=reader_seed,
-    )
-    return lr, hr
-
-
-class DaliCodecTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
-    """Infinite iterator over DALI-decoded LR/HR canvas batches."""
-
-    def __init__(
-        self,
-        manifest: str | Path,
-        *,
-        project_root: Path,
-        settings: TrainDataSettings,
-        batch_size: int,
-        device_id: int,
-        rank: int,
-        world_size: int,
-        seed: int,
-    ) -> None:
-        if not nvidia_cuvid_available():
-            raise RuntimeError(
-                "DALI video decode requires libnvcuvid.so (NVDEC). "
-                "Set NVIDIA_DRIVER_CAPABILITIES=compute,utility,video."
-            )
-
-        self._settings = settings
-        self._device = torch.device(f"cuda:{device_id}")
-        self._index = build_codec_frame_index(
-            manifest,
-            project_root=project_root,
-            seed=seed + rank,
-            for_dali=True,
-        )
-        assert self._index.lr_list is not None and self._index.hr_list is not None
-        self._pipe = _codec_pair_pipeline(
-            batch_size=batch_size,
-            num_threads=settings.dali_num_threads,
-            device_id=device_id,
-            lr_file_list=str(self._index.lr_list),
-            hr_file_list=str(self._index.hr_list),
-            shard_id=rank,
-            num_shards=max(world_size, 1),
-            initial_fill=settings.dali_initial_fill,
-            reader_seed=seed + rank,
-            seed=seed + rank,
-        )
-        self._pipe.build()
-        self._iterator = DALIGenericIterator(
-            [self._pipe],
-            output_map=["lr", "hr"],
-            reader_name="lr_reader",
-            last_batch_policy=LastBatchPolicy.PARTIAL,
-            auto_reset=True,
-        )
-
-    def __iter__(self) -> DaliCodecTrainIterator:
-        return self
-
-    def __next__(self) -> tuple[torch.Tensor, torch.Tensor]:
-        while True:
-            batch = next(self._iterator)
-            lr = batch[0]["lr"]
-            hr = batch[0]["hr"]
-            if lr.shape[0] == 0:
-                continue
-            return apply_canvas_batch_transform(
-                lr,
-                hr,
-                lr_size=self._settings.lr_size,
-                hr_size=self._settings.hr_size,
-                colorspace=self._settings.colorspace,
-                nv12_simulate=self._settings.nv12_simulate,
-                augment=self._settings.augment,
-                device=self._device,
-                patch_size=self._settings.patch_size,
-                scale=self._settings.scale,
-                augment_rot90=self._settings.augment_rot90,
-                augment_lr_decode_noise=self._settings.augment_lr_decode_noise,
-                augment_lr_jpeg=self._settings.augment_lr_jpeg,
-            )
-
-    def close(self) -> None:
-        if self._index.temp_dir is not None:
-            self._index.temp_dir.cleanup()
-
-
-def project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
 def resolve_decode_backend(requested: str) -> str:
-    """Resolve the decode backend. Only DALI (NVDEC) is supported now; the
-    torchcodec CPU fallback has been removed because its libav coupling was
-    fragile and the project targets GPU training environments."""
-    if requested in ("dali", "auto"):
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "decode requires CUDA (DALI NVDEC); torchcodec fallback removed"
-            )
-        if not nvidia_cuvid_available():
-            raise RuntimeError(
-                "decode requires libnvcuvid.so (NVDEC); torchcodec fallback removed"
-            )
-        return "dali"
-    raise ValueError(
-        f"Unsupported decode {requested!r}; use auto or dali (torchcodec removed)"
-    )
+    """Resolve the decode backend. Runtime reads offline LR/HR .npy only."""
+    if requested in ("raw", "auto"):
+        return "raw"
+    raise ValueError(f"Unsupported decode {requested!r}; use auto or raw")
 
 
 @dataclass(frozen=True)
@@ -268,8 +119,7 @@ class TrainDataSettings:
     nv12_simulate: bool = True
     augment: bool = True
     decode: str = "auto"
-    dali_num_threads: int = 4
-    dali_initial_fill: int = 32
+    decode_num_workers: int = 4
     project_root: str | None = None
     patch_size: int | None = None
     scale: int = 3
@@ -290,6 +140,142 @@ class CodecTrainLoader:
             self._close.close()  # type: ignore[union-attr]
 
 
+class RawFrameTrainIterator(Iterator[tuple[torch.Tensor, torch.Tensor]]):
+    """Infinite iterator: mmap LR/HR .npy, optional windowed crop, GPU augment."""
+
+    def __init__(
+        self,
+        manifest: str | Path,
+        *,
+        project_root: Path,
+        settings: TrainDataSettings,
+        batch_size: int,
+        device_id: int,
+        rank: int,
+        world_size: int,
+        seed: int,
+    ) -> None:
+        self._settings = settings
+        self._batch_size = batch_size
+        if torch.cuda.is_available():
+            self._device = torch.device(f"cuda:{device_id}")
+        else:
+            self._device = torch.device("cpu")
+
+        index = build_codec_frame_index(
+            manifest,
+            project_root=project_root,
+            seed=seed,
+        )
+        shard = max(world_size, 1)
+        self._entries = index.entries[rank::shard]
+        if not self._entries:
+            raise ValueError(
+                f"rank {rank}/{shard} received zero codec frames after sharding"
+            )
+        self._pos = 0
+        self._npy_cache: dict[Path, np.ndarray] = {}
+        self._cache_lock = Lock()
+        workers = max(0, int(settings.decode_num_workers))
+        self._pool: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=workers) if workers > 0 else None
+        )
+
+    def __iter__(self) -> RawFrameTrainIterator:
+        return self
+
+    def _mmap_npy(self, path: Path) -> np.ndarray:
+        with self._cache_lock:
+            cached = self._npy_cache.get(path)
+            if cached is None:
+                cached = np.load(path, mmap_mode="r")
+                self._npy_cache[path] = cached
+            return cached
+
+    def _read_pair(self, entry: CodecFrameEntry) -> tuple[torch.Tensor, torch.Tensor]:
+        lr_clip = self._mmap_npy(entry.lr_path)
+        hr_clip = self._mmap_npy(entry.hr_path)
+        lr_frame = lr_clip[entry.lr_frame]
+        hr_frame = hr_clip[entry.hr_frame]
+        patch = self._settings.patch_size
+        scale = self._settings.scale
+
+        if patch is not None:
+            lr_h, lr_w = int(lr_frame.shape[0]), int(lr_frame.shape[1])
+            hr_h, hr_w = int(hr_frame.shape[0]), int(hr_frame.shape[1])
+            if hr_h != lr_h * scale or hr_w != lr_w * scale:
+                raise ValueError(
+                    f"windowed read requires HR==LR*scale, got LR {lr_h}x{lr_w}, "
+                    f"HR {hr_h}x{hr_w}, scale={scale} for {entry.record_id!r}"
+                )
+            top, left = sample_lr_crop_xy(
+                lr_h,
+                lr_w,
+                lr_crop_h=patch,
+                lr_crop_w=patch,
+                scale=scale,
+            )
+            lr_np = np.array(lr_frame[top : top + patch, left : left + patch], copy=True)
+            hr_np = np.array(
+                hr_frame[
+                    top * scale : (top + patch) * scale,
+                    left * scale : (left + patch) * scale,
+                ],
+                copy=True,
+            )
+            lr = torch.from_numpy(lr_np).permute(2, 0, 1).contiguous().float()
+            hr = torch.from_numpy(hr_np).permute(2, 0, 1).contiguous().float()
+            return lr, hr
+
+        lr = torch.from_numpy(np.array(lr_frame, copy=True)).permute(2, 0, 1).contiguous().float()
+        hr = torch.from_numpy(np.array(hr_frame, copy=True)).permute(2, 0, 1).contiguous().float()
+        return lr, hr
+
+    def _next_entries(self) -> list[CodecFrameEntry]:
+        n = len(self._entries)
+        out: list[CodecFrameEntry] = []
+        for _ in range(self._batch_size):
+            out.append(self._entries[self._pos % n])
+            self._pos += 1
+        return out
+
+    def __next__(self) -> tuple[torch.Tensor, torch.Tensor]:
+        entries = self._next_entries()
+        if self._pool is not None:
+            pairs = list(self._pool.map(self._read_pair, entries))
+        else:
+            pairs = [self._read_pair(e) for e in entries]
+        lr = torch.stack([p[0] for p in pairs], dim=0)
+        hr = torch.stack([p[1] for p in pairs], dim=0)
+        pre_cropped = self._settings.patch_size is not None
+        return apply_canvas_batch_transform(
+            lr,
+            hr,
+            lr_size=self._settings.lr_size,
+            hr_size=self._settings.hr_size,
+            colorspace=self._settings.colorspace,
+            nv12_simulate=self._settings.nv12_simulate,
+            augment=self._settings.augment,
+            device=self._device,
+            patch_size=self._settings.patch_size,
+            scale=self._settings.scale,
+            augment_rot90=self._settings.augment_rot90,
+            augment_lr_decode_noise=self._settings.augment_lr_decode_noise,
+            augment_lr_jpeg=self._settings.augment_lr_jpeg,
+            pre_cropped=pre_cropped,
+        )
+
+    def close(self) -> None:
+        if self._pool is not None:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+            self._pool = None
+        self._npy_cache.clear()
+
+
+def project_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 def build_codec_train_loader(
     settings: TrainDataSettings,
     *,
@@ -299,15 +285,13 @@ def build_codec_train_loader(
     seed: int = 0,
     device_id: int | None = None,
 ) -> CodecTrainLoader:
-    """Build the canvas codec training iterator."""
+    """Build the canvas codec training iterator (LR/HR .npy)."""
     root = Path(settings.project_root or project_root())
     dev_id = rank if device_id is None else device_id
     backend = resolve_decode_backend(settings.decode)
-    if backend != "dali":
-        raise RuntimeError(
-            f"only DALI backend supported (torchcodec removed), got {backend!r}"
-        )
-    iterator = DaliCodecTrainIterator(
+    if backend != "raw":
+        raise RuntimeError(f"only raw backend supported, got {backend!r}")
+    iterator = RawFrameTrainIterator(
         settings.codec_manifest,
         project_root=root,
         settings=settings,
@@ -317,7 +301,6 @@ def build_codec_train_loader(
         world_size=world_size,
         seed=seed,
     )
-
     return CodecTrainLoader(dataloader=iterator, _close=iterator)
 
 
@@ -342,8 +325,7 @@ def data_settings_from_args(args) -> TrainDataSettings:
         colorspace=getattr(args, "colorspace", None) or data.colorspace,
         augment=augment,
         decode=decode,
-        dali_num_threads=data.dali_num_threads,
-        dali_initial_fill=data.dali_initial_fill,
+        decode_num_workers=getattr(data, "decode_num_workers", 4),
         project_root=str(project_root()),
         patch_size=getattr(args, "patch_size", None),
         scale=getattr(args, "scale", 3),

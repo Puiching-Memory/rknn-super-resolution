@@ -38,7 +38,7 @@ rk3588_mobile_sr/
 ├── src/rk3588_mobile_sr/          # 可安装包（src layout）
 │   ├── cli.py                     # 统一 CLI 入口
 │   ├── config/                    # YAML 配置加载
-│   ├── data/                      # 训练期 manifest / loader（codec_index、DALI）
+│   ├── data/                      # 训练期 manifest / loader（codec_index、raw .npy）
 │   ├── data_pipeline/             # 离线 codec cache 构建（Snakemake 配套 Python）
 │   ├── models/                    # MobileOneSR 模型与 QAT 工具
 │   ├── losses/                    # 训练损失函数
@@ -68,7 +68,7 @@ uv sync
 uv sync
 ```
 
-PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVIDIA PyPI）。
+PyTorch wheel 源已在 `pyproject.toml` 中配置（`cu132`）。
 > RKNN 转换建议在独立环境中安装 `rknn-toolkit2`，因为它对 torch/onnx 的版本限制与本项目训练依赖冲突。
 
 ## CLI 用法
@@ -79,7 +79,7 @@ PyTorch 与 DALI 的 wheel 源已在 `pyproject.toml` 中配置（`cu130` + NVID
 # 查看帮助
 uv run rk3588-mobile-sr --help
 
-# 训练（DDP 仍用 torchrun 包装；canvas codec 离线缓存 + NVDEC）
+# 训练（DDP 仍用 torchrun 包装；离线 LR/HR .npy，纯 CPU mmap）
 torchrun --nproc_per_node=3 rk3588-mobile-sr train stage1 \
   --codec_manifest data/codec_cache/manifest.jsonl \
   --val_manifest data/sources/manifests/val_fixed.jsonl \
@@ -95,23 +95,22 @@ uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage1/best.pth ...
 
 ## 数据准备
 
-训练数据由 **manifest JSONL** 描述原生视频源（UVG 1080p YUV420p）。离线 LR codec cache 由 **Snakemake** 编排（代码在 `src/rk3588_mobile_sr/data_pipeline/`，DAG 在 `scripts/pipeline/`），训练侧读 `data/codec_cache/manifest.jsonl`。
+训练数据由 **manifest JSONL** 描述原生视频源（UVG 1080p YUV420p）。离线管线由 **Snakemake** 编排：编码 LR codec mp4 + 无损 HR mp4，再统一烘焙成 RGB `.npy`；训练/验证只读 `data/raw_cache/*_{lr,hr}.npy`（一套格式、一套 loader）。
 
 ```bash
-# 一键：发现源 -> 写 manifest -> Snakemake 构建 codec cache
+# 一键：发现源 -> 写 manifest -> Snakemake 构建 codec cache + raw .npy
 ./scripts/build_data.sh
 
 # 或分步：
 uv run rk3588-build-train-manifest    # train.jsonl + val_fixed.jsonl（同一 discover 脚本）
 uv run rk3588-build-codec-cache       # snakemake -j$(nproc) all
 
-# 仅刷新 manifest（已有 mp4，不重编码）：
+# 仅刷新 manifest（已有 .npy，不重解码）：
 uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest \
   --root . \
   --train-manifest data/sources/manifests/train.jsonl \
   --output data/codec_cache/manifest.jsonl \
-  --cache-dir data/codec_cache \
-  --hr-dir data/hr_lossless
+  --raw-cache-dir data/raw_cache
 ```
 
 `build_data.sh` 支持环境变量：`WORKERS`、`CLIPS_PER_VIDEO`、`BITRATES`；干跑传 `./scripts/build_data.sh -- -n`。
@@ -123,25 +122,26 @@ data/
 ├── sources/manifests/
 │   ├── train.jsonl              # UVG YUV 源
 │   └── val_fixed.jsonl          # 固定 UVG 验证行
-├── codec_cache/manifest.jsonl   # 离线 LR clip 索引（训练读取）
-├── codec_cache/*.mp4            # 预编码 LR clips（退化+压缩）
-├── hr_lossless/*_s{clip}_hr.mp4 # 每 clip 的无损 H.264 HR（CRF 0，监督标签）
-└── UVG_raw/yuv_1080p/           # 原始 1080p YUV420 序列
+├── codec_cache/manifest.jsonl   # 索引（path→LR .npy，hr_path→HR .npy）
+├── codec_cache/*.mp4            # 中间 LR codec clips（离线解码用）
+├── raw_cache/*_lr.npy           # 烘焙 LR RGB（训练/验证）
+├── raw_cache/*_hr.npy           # 烘焙 HR RGB（训练/验证，按 clip 共享）
+├── hr_lossless/*_s{clip}_hr.mp4 # 离线 degrade / HR bake 用的无损 HR
+└── UVG_raw/yuv_1080p/           # 原始 1080p YUV420（仅离线管线输入）
 
 scripts/pipeline/
-├── Snakefile                    # discover -> hr_clip -> degrade_and_encode -> manifest
+├── Snakefile                    # discover -> hr_clip -> degrade -> decode_{lr,hr}_to_raw -> manifest
 ├── config.yaml                  # codecs / bitrates / gop_candidates / clips 等
 └── ffmpeg/                      # hr_clip.sh（无损 HR 提取）
 ```
 
-默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线 codec cache + GPU 解码**：
+默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线烘焙 + 纯 CPU mmap**：
 
-1. Snakemake 从原始 YUV 提取每 clip 的 **无损 H.264 HR**（CRF 0，监督标签与源 bit-exact），再对 HR 做 **混合下采样核 + 压缩前传感器噪声 + LR codec 编码**（单次 ffmpeg pass，无 rgb24 中间产物），写出 `codec_cache/manifest.jsonl`
-2. 训练时 `decode=auto` 使用 DALI NVDEC（需 `libnvcuvid`；torchcodec CPU fallback 已移除）
+1. Snakemake 从原始 YUV 提取每 clip 的 **无损 H.264 HR**，再 degrade+encode 出 LR codec mp4；随后用同一套 `decode_to_raw` 把 **LR/HR mp4 都 bake 成 `.npy`**，写出 `codec_cache/manifest.jsonl`
+2. 训练采样按码率/GOP 分布抽 clip；**另外**为 `val_fixed.jsonl` 的每个 `(序列×编码器×码率)` 在固定 `clip_start` 上单独 bake，保证验证帧落在真实压缩窗口内（禁止干净下采样 fallback）
+3. 训练/验证 `decode=auto|raw`：**LR/HR 都 mmap 读 `.npy`**（patch 训练时再窗口裁剪），运行时零视频解码、也不再读 YUV。不引入 PyAV / DALI。
 
 退化链顺序模拟真实视频采集：HR 无损 -> 光学低通模糊 -> 传感器噪声 -> 混合下采样核（area/bicubic/lanczos）-> codec 编码；在线 augment 只保留压缩后的 JPEG/解码噪声，物理顺序正确。GOP 与码率按真实分布采样（log-normal 码率、加权 GOP 候选），I/P 帧在 `expand_codec_clip_frames` 中加权（P 帧权重更高以多见块效应）。
-
-Docker 需设置 `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` 以启用 NVDEC。
 
 ### Bash 脚本（`scripts/`）
 
@@ -237,7 +237,13 @@ uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.stage1 \
   --save_dir ./checkpoints/stage1
 ```
 
-Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次，若连续 `--early_stop_patience`（10）次验证 PSNR 无提升（阈值 `--early_stop_min_delta` 0.01 dB）则停止；`--max_steps`（100000）为安全上限。可用 `--no_early_stop` 改为只跑到 `max_steps`。
+Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次，主指标为 **VMAF v1**（默认标准 1080p / 3H 模型 [`vmaf_v1.0.16_3d0h`](https://github.com/Netflix/vmaf/blob/master/resource/doc/models_v1.md)；可用 `--vmaf_model phone` 切到 5H）。若连续 `--early_stop_patience`（10）次验证 VMAF 无提升（阈值 `--early_stop_min_delta` 0.1）则停止；`--max_steps`（100000）为安全上限。可用 `--no_early_stop` 改为只跑到 `max_steps`，或 `--no_vmaf` 退回 PSNR 主指标。
+
+首次需要编译 Netflix libvmaf（安装到仓库 `.local/`）：
+
+```bash
+./scripts/setup_vmaf.sh
+```
 
 ### Stage 2：QAT 量化感知训练
 

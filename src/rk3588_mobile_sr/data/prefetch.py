@@ -47,5 +47,14 @@ class BatchPrefetcher(Iterator[T]):
     def close(self) -> None:
         self._stop.set()
         while not self._queue.empty():
-            self._queue.get_nowait()
-        self._queue.put(None)
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        # Unblock a worker stuck on put() so it can observe _stop / exit.
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=30.0)

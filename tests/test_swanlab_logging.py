@@ -11,11 +11,11 @@ import torch
 import torch.nn as nn
 
 from rk3588_mobile_sr.config import default_config_path
-from rk3588_mobile_sr.data.types import ValSampleSpec, SourceRecord
+from rk3588_mobile_sr.data.types import SourceRecord, ValSampleMeta, ValSampleSpec
 from rk3588_mobile_sr.data.val_loader import select_val_vis_indices, val_spec_slug
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
 from rk3588_mobile_sr.utils.swanlab_logging import (
-    _append_codec_clip_videos,
+    ValVisSample,
     _looks_like_local_run_suffix,
     collect_sr_validation_panels,
     find_swanlab_run_id,
@@ -26,6 +26,7 @@ from rk3588_mobile_sr.utils.swanlab_logging import (
     resolve_swanlab_run_id,
     rgb_diff_stats,
     save_swanlab_run_record,
+    save_val_vis_samples,
 )
 from rk3588_mobile_sr.utils.train_framework import resolve_colorspace
 
@@ -53,54 +54,27 @@ def _spec(seq: str, codec: str, bitrate: int) -> ValSampleSpec:
     )
 
 
-def test_append_codec_clip_videos_adds_lr_and_hr_keys(tmp_path: Path, monkeypatch):
-    lr = tmp_path / "lr.mp4"
-    hr = tmp_path / "hr.mp4"
-    lr.write_bytes(b"lr")
-    hr.write_bytes(b"hr")
-
-    class _FakeVideo:
-        def __init__(self, path: str, *, caption: str = "") -> None:
-            self.path = path
-            self.caption = caption
-
-    monkeypatch.setattr(
-        "rk3588_mobile_sr.utils.swanlab_logging.swanlab.Video",
-        _FakeVideo,
-    )
-    payload: dict = {}
-    _append_codec_clip_videos(
-        payload,
-        key_prefix="val",
-        slug="Beauty_libx264_800k",
-        lr_video=lr,
-        hr_video=hr,
-        caption="Beauty | libx264 @ 800kbps",
-    )
-    assert set(payload) == {
-        "val/Beauty_libx264_800k/lr_clip",
-        "val/Beauty_libx264_800k/hr_clip",
-    }
-    assert payload["val/Beauty_libx264_800k/lr_clip"].path == str(lr)
-
-
 def test_resolve_colorspace_from_yaml():
     args = argparse.Namespace(colorspace=None, config=str(default_config_path()))
     assert resolve_colorspace(args) == "yuv"
 
 
-def test_select_val_vis_indices_prefers_diverse_sequences():
+def test_select_val_vis_indices_covers_seq_codec_bitrate():
     specs = [
-        _spec("Beauty", "libx264", 300),
+        _spec("Beauty", "libx264", 150),
         _spec("Beauty", "libx264", 800),
-        _spec("Bosphorus", "libx265", 800),
+        _spec("Bosphorus", "libx265", 300),
         _spec("CityAlley", "libsvtav1", 500),
+        _spec("Jockey", "libx264", 200),
     ]
-    indices = select_val_vis_indices(specs, 3)
-    assert len(indices) == 3
-    assert indices[0] == 1  # Beauty @ 800k
+    indices = select_val_vis_indices(specs, 4)
+    assert len(indices) == 4
     sequences = {specs[i].source.id.split("@")[0].split("/")[-1] for i in indices}
-    assert sequences == {"Beauty", "Bosphorus", "CityAlley"}
+    codecs = {specs[i].codec for i in indices}
+    bitrates = {specs[i].bitrate_kbps for i in indices}
+    assert sequences == {"Beauty", "Bosphorus", "CityAlley", "Jockey"}
+    assert codecs == {"libx264", "libx265", "libsvtav1"}
+    assert bitrates == {150, 200, 300, 500}
 
 
 def test_val_spec_slug():
@@ -151,6 +125,25 @@ def test_collect_sr_validation_panels_converts_yuv_to_rgb():
     )
     hr_col = panels[0][:, 64:96, :]
     assert hr_col[..., 0].mean() > hr_col[..., 1].mean()
+
+
+def test_save_val_vis_samples_writes_png(tmp_path: Path):
+    sample = ValVisSample(
+        meta=ValSampleMeta(
+            slug="Beauty_libx264_150k",
+            sequence="Beauty",
+            codec="libx264",
+            bitrate_kbps=150,
+            frame_index=0,
+            lr_size=(12, 12),
+            hr_size=(36, 36),
+        ),
+        panel=np.zeros((36, 108, 3), dtype=np.uint8),
+    )
+    out = save_val_vis_samples([sample], tmp_path)
+    path = out / "Beauty_libx264_150k.png"
+    assert path.is_file()
+    assert path.stat().st_size > 0
 
 
 def test_find_swanlab_run_id_prefers_earliest_matching_experiment(tmp_path: Path):

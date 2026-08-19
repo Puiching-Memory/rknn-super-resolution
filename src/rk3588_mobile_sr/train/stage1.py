@@ -36,8 +36,25 @@ def parse_args():
     parser.add_argument("--val_every", type=int, default=1000)
     parser.add_argument("--save_every", type=int, default=5000)
     parser.add_argument("--early_stop_patience", type=int, default=10)
-    parser.add_argument("--early_stop_min_delta", type=float, default=0.01)
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.1,
+        help="min VMAF improvement to reset early-stop patience (VMAF scale ~0-100)",
+    )
     parser.add_argument("--no_early_stop", action="store_true")
+    parser.add_argument(
+        "--vmaf_model",
+        type=str,
+        default="1080p",
+        help="VMAF v1 model alias: 1080p|phone|phone_hfr|1080p_hfr|4k|4k_3h "
+        "(see Netflix models_v1.md); or version=/path= override",
+    )
+    parser.add_argument(
+        "--no_vmaf",
+        action="store_true",
+        help="disable VMAF; fall back to PSNR as the primary val / early-stop metric",
+    )
     parser.add_argument(
         "--resume",
         type=str,
@@ -162,6 +179,8 @@ def main():
             vis_max_size=args.vis_max_size,
             colorspace=resolve_colorspace(args),
             data_preview=not args.no_data_preview,
+            compute_vmaf=not args.no_vmaf,
+            vmaf_model=args.vmaf_model,
         )
 
         try:

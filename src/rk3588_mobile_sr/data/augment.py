@@ -88,6 +88,37 @@ def build_lr_degrade_augment(config: AugmentConfig) -> K.AugmentationSequential:
     return K.AugmentationSequential(*ops)
 
 
+def sample_lr_crop_xy(
+    lr_h: int,
+    lr_w: int,
+    *,
+    lr_crop_h: int,
+    lr_crop_w: int,
+    scale: int,
+) -> tuple[int, int]:
+    """Sample an LR crop origin aligned for YUV420 HR window reads.
+
+    HR coords are ``(top * scale, left * scale)``. For odd ``scale``, LR origins
+    are forced even so HR tops/lefts stay even after scaling (chroma-aligned).
+    """
+    if lr_crop_h > lr_h or lr_crop_w > lr_w:
+        raise ValueError(f"crop {lr_crop_h}x{lr_crop_w} exceeds LR {lr_h}x{lr_w}")
+    max_top = lr_h - lr_crop_h
+    max_left = lr_w - lr_crop_w
+    if scale % 2 == 1:
+        # Even LR origin => even HR origin when scale is odd.
+        top = int(torch.randint(0, max_top + 1, (1,)).item()) & ~1
+        left = int(torch.randint(0, max_left + 1, (1,)).item()) & ~1
+        if top > max_top:
+            top = max_top & ~1
+        if left > max_left:
+            left = max_left & ~1
+    else:
+        top = int(torch.randint(0, max_top + 1, (1,)).item())
+        left = int(torch.randint(0, max_left + 1, (1,)).item())
+    return top, left
+
+
 def batch_random_crop_pair(
     lr: torch.Tensor,
     hr: torch.Tensor,
@@ -106,14 +137,16 @@ def batch_random_crop_pair(
         raise ValueError(f"crop {lr_crop_h}x{lr_crop_w} exceeds LR {lr_h}x{lr_w}")
 
     hr_crop_h, hr_crop_w = lr_crop_h * scale, lr_crop_w * scale
-    tops = torch.randint(0, lr_h - lr_crop_h + 1, (b,), device=lr.device)
-    lefts = torch.randint(0, lr_w - lr_crop_w + 1, (b,), device=lr.device)
-
     out_lr = torch.empty((b, lr.shape[1], lr_crop_h, lr_crop_w), device=lr.device, dtype=lr.dtype)
     out_hr = torch.empty((b, hr.shape[1], hr_crop_h, hr_crop_w), device=hr.device, dtype=hr.dtype)
     for i in range(b):
-        top = int(tops[i])
-        left = int(lefts[i])
+        top, left = sample_lr_crop_xy(
+            lr_h,
+            lr_w,
+            lr_crop_h=lr_crop_h,
+            lr_crop_w=lr_crop_w,
+            scale=scale,
+        )
         out_lr[i] = lr[i, :, top : top + lr_crop_h, left : left + lr_crop_w]
         hr_top, hr_left = top * scale, left * scale
         out_hr[i] = hr[i, :, hr_top : hr_top + hr_crop_h, hr_left : hr_left + hr_crop_w]

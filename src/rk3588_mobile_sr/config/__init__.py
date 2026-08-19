@@ -31,8 +31,7 @@ class DataConfig:
     nv12_simulate: bool = True
     augment: bool = True
     decode: str = "auto"
-    dali_num_threads: int = 4
-    dali_initial_fill: int = 32
+    decode_num_workers: int = 4
     prefetch_batches: int = 4
     augment_rot90: bool = False
     augment_lr_decode_noise: bool = False
@@ -45,7 +44,7 @@ class Stage1Config:
     batch_size: int = 16
     max_steps: int = 100_000
     early_stop_patience: int = 10
-    early_stop_min_delta: float = 0.01
+    early_stop_min_delta: float = 0.1
     val_every: int = 1000
     lr: float = 1e-3
     loss: str = "l1"

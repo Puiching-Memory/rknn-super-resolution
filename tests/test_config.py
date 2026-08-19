@@ -23,5 +23,5 @@ def test_load_config_from_path():
     path = default_config_path()
     assert path.exists()
     cfg = load_config(path)
-    assert cfg.data.dali_num_threads == 4
+    assert cfg.data.decode_num_workers == 4
     assert cfg.data.prefetch_batches == 4

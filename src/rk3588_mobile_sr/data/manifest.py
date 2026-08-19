@@ -42,18 +42,20 @@ def _validate_record(record: SourceRecord, *, project_root: Path | None) -> None
         if not resolved.is_file():
             raise FileNotFoundError(f"Source file missing for {record.id}: {resolved}")
         if record.type == "codec_clip":
+            hr_rel = record.extra.get("hr_path")
+            if not hr_rel:
+                raise ValueError(f"codec_clip {record.id} requires hr_path (.npy)")
+            hr_path = (project_root / hr_rel).resolve()
+            if not hr_path.is_file():
+                raise FileNotFoundError(f"HR .npy missing for {record.id}: {hr_path}")
+            # Optional provenance / legacy fields.
             source_path = record.extra.get("source_path")
-            if not source_path:
-                raise ValueError(f"codec_clip {record.id} requires source_path")
-            hr_mp4 = record.extra.get("hr_mp4_path")
-            if hr_mp4:
-                mp4_path = (project_root / hr_mp4).resolve()
-                if not mp4_path.is_file():
-                    raise FileNotFoundError(f"HR mezzanine missing for {record.id}: {mp4_path}")
-            else:
-                hr_path = (project_root / source_path).resolve()
-                if not hr_path.is_file():
-                    raise FileNotFoundError(f"HR source missing for {record.id}: {hr_path}")
+            if source_path:
+                src = (project_root / source_path).resolve()
+                if not src.is_file():
+                    raise FileNotFoundError(
+                        f"source_path missing for {record.id}: {src}"
+                    )
 
     if record.type == "yuv_video":
         if record.width <= 0 or record.height <= 0 or record.frames <= 0:

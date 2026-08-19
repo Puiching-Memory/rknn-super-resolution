@@ -43,7 +43,8 @@ def test_early_stop_improves_resets_patience():
     state = EarlyStopState(enabled=True, patience=3, min_delta=0.1)
     improved, stop = state.update(25.0)
     assert improved and not stop
-    assert state.best_psnr == 25.0
+    assert state.best_score == 25.0
+    assert state.best_psnr == 25.0  # legacy alias
     assert state.patience_counter == 0
 
     improved, stop = state.update(25.5)
@@ -115,7 +116,7 @@ def test_step_trainer_runs_steps_and_validation(tmp_path):
         val_steps.append(step)
         return ValidationResult(
             step=step,
-            psnr=30.0,
+            score=30.0,
             val_metrics=None,
             improved=True,
             should_stop=step >= 10,

@@ -9,6 +9,10 @@ cd "$ROOT"
 export NO_PROXY="swanlab.cn,.swanlab.cn,api.swanlab.cn,localhost,127.0.0.1,${NO_PROXY:-}"
 export no_proxy="$NO_PROXY"
 
+# Project-local Netflix libvmaf (VMAF v1) from ./scripts/setup_vmaf.sh
+export PATH="$ROOT/.local/bin:${PATH:-}"
+export LD_LIBRARY_PATH="$ROOT/.local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
 # SwanLab SDK parses SWANLAB_EXPERIMENT as JSON on import.
 unset SWANLAB_EXPERIMENT SWANLAB_RESUME SWANLAB_RUN_ID
 

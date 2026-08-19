@@ -62,47 +62,86 @@ def read_yuv420_patch(
     left: int,
     crop_h: int,
     crop_w: int,
+    mmap: np.memmap | None = None,
 ) -> torch.Tensor:
     """Read a YUV420p crop and return RGB float CHW in [0, 255].
 
-    ``top``/``left``/``crop_h``/``crop_w`` must be even (YUV420 chroma alignment).
+    Coordinates are forced even for YUV420 chroma alignment. Prefer passing a
+    cached ``mmap`` from the caller to avoid re-opening the file every crop.
     """
     top = top & ~1
     left = left & ~1
     crop_h = crop_h & ~1
     crop_w = crop_w & ~1
+    if top < 0 or left < 0 or top + crop_h > height or left + crop_w > width:
+        raise ValueError(
+            f"crop ({top},{left},{crop_h}x{crop_w}) outside {width}x{height} for {path}"
+        )
 
     frame_bytes = yuv420_frame_bytes(width, height)
     offset = frame_index * frame_bytes
     y_size = width * height
     uv_w = width // 2
-    uv_h = height // 2
     uv_top = top // 2
     uv_left = left // 2
     uv_crop_h = crop_h // 2
     uv_crop_w = crop_w // 2
 
-    with path.open("rb") as handle:
-        handle.seek(offset)
-        y_rows = []
-        for row in range(top, top + crop_h):
-            handle.seek(offset + row * width + left)
-            y_rows.append(np.frombuffer(handle.read(crop_w), dtype=np.uint8))
+    own_mmap = mmap is None
+    mm = np.memmap(path, mode="r", dtype=np.uint8) if own_mmap else mmap
+    assert mm is not None
+    try:
+        if offset + frame_bytes > mm.size:
+            raise IndexError(
+                f"frame {frame_index} out of range for {path} "
+                f"(frames={mm.size // frame_bytes})"
+            )
+
+        y_rows = [
+            np.array(
+                mm[offset + row * width + left : offset + row * width + left + crop_w],
+                copy=True,
+            )
+            for row in range(top, top + crop_h)
+        ]
         plane_y = np.stack(y_rows, axis=0)
 
-        u_offset = offset + y_size
-        u_rows = []
-        for row in range(uv_top, uv_top + uv_crop_h):
-            handle.seek(u_offset + row * uv_w + uv_left)
-            u_rows.append(np.frombuffer(handle.read(uv_crop_w), dtype=np.uint8))
+        u_base = offset + y_size
+        u_rows = [
+            np.array(
+                mm[
+                    u_base
+                    + row * uv_w
+                    + uv_left : u_base
+                    + row * uv_w
+                    + uv_left
+                    + uv_crop_w
+                ],
+                copy=True,
+            )
+            for row in range(uv_top, uv_top + uv_crop_h)
+        ]
         plane_u = np.stack(u_rows, axis=0)
 
-        v_offset = offset + y_size + (y_size // 4)
-        v_rows = []
-        for row in range(uv_top, uv_top + uv_crop_h):
-            handle.seek(v_offset + row * uv_w + uv_left)
-            v_rows.append(np.frombuffer(handle.read(uv_crop_w), dtype=np.uint8))
+        v_base = offset + y_size + (y_size // 4)
+        v_rows = [
+            np.array(
+                mm[
+                    v_base
+                    + row * uv_w
+                    + uv_left : v_base
+                    + row * uv_w
+                    + uv_left
+                    + uv_crop_w
+                ],
+                copy=True,
+            )
+            for row in range(uv_top, uv_top + uv_crop_h)
+        ]
         plane_v = np.stack(v_rows, axis=0)
+    finally:
+        if own_mmap:
+            del mm
 
     rgb = _yuv420_to_rgb_numpy(plane_y, plane_u, plane_v)
     return torch.from_numpy(rgb).permute(2, 0, 1).contiguous().float()

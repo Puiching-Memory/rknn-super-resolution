@@ -2,35 +2,18 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
-import torch
 
 from rk3588_mobile_sr.data.train_loader import resolve_decode_backend
 
 
 def test_resolve_decode_backend_auto():
-    with patch.object(torch.cuda, "is_available", return_value=True), patch(
-        "rk3588_mobile_sr.data.train_loader.nvidia_cuvid_available",
-        return_value=True,
-    ):
-        assert resolve_decode_backend("auto") == "dali"
-    # torchcodec fallback removed: auto now raises when NVDEC is unavailable.
-    with patch.object(torch.cuda, "is_available", return_value=False), pytest.raises(
-        RuntimeError, match="torchcodec fallback removed"
-    ):
-        resolve_decode_backend("auto")
-
-
-def test_resolve_decode_backend_dali_requires_cuvid():
-    with patch(
-        "rk3588_mobile_sr.data.train_loader.nvidia_cuvid_available",
-        return_value=False,
-    ), pytest.raises(RuntimeError, match="torchcodec fallback removed"):
-        resolve_decode_backend("dali")
+    assert resolve_decode_backend("auto") == "raw"
+    assert resolve_decode_backend("raw") == "raw"
 
 
 def test_resolve_decode_backend_invalid():
     with pytest.raises(ValueError, match="Unsupported decode"):
         resolve_decode_backend("npu")
+    with pytest.raises(ValueError, match="Unsupported decode"):
+        resolve_decode_backend("dali")

@@ -8,7 +8,6 @@ license = { text = "MIT" }
 dependencies = [
     "onnx>=1.17",
     "onnxscript>=0.7",
-    "nvidia-dali-cuda130>=2.1.0",
     "loguru>=0.7",
     "pillow>=10.0",
     "pyyaml>=6.0",
@@ -53,16 +52,10 @@ rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:mai
 [tool.uv.sources]
 torch = { index = "pytorch-cu132" }
 torchvision = { index = "pytorch-cu132" }
-nvidia-dali-cuda130 = { index = "nvidia" }
 
 [[tool.uv.index]]
 name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
-explicit = true
-
-[[tool.uv.index]]
-name = "nvidia"
-url = "https://pypi.nvidia.com"
 explicit = true
 
 [tool.uv.extra-build-dependencies]

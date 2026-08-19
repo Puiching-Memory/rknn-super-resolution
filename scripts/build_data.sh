@@ -68,4 +68,4 @@ if [[ "$SMK_EXIT" -ne 0 ]]; then
   exit "$SMK_EXIT"
 fi
 
-echo "[$(date -Is)] done -> data/codec_cache/manifest.jsonl"
+echo "[$(date -Is)] done -> data/codec_cache/manifest.jsonl + data/raw_cache/*_{lr,hr}.npy"
