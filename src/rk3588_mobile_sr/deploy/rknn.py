@@ -8,8 +8,12 @@ import sys
 from pathlib import Path
 
 from rk3588_mobile_sr.config import load_config
+from rk3588_mobile_sr.deploy.rknn_env import (
+    needs_rknn_reexec,
+    reexec_in_rknn_python,
+    resolve_rknn_python,
+)
 from rk3588_mobile_sr.deploy.rknn_eval import add_eval_args, run_post_build_eval
-from rk3588_mobile_sr.deploy.rknn_env import needs_rknn_reexec, reexec_in_rknn_python, resolve_rknn_python
 
 
 def import_rknn():
@@ -86,15 +90,6 @@ def parse_args():
         help="RKNN-dedicated Python interpreter (default: deploy.rknn_python or RK3588_RKNN_PYTHON).",
     )
     parser.add_argument(
-        "--input-nv12",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Accept NV12 at runtime (RKNN inserts yuv2rgb). Default off: larger graph, "
-            "PC simulator eval is unreliable; validate on-board with real MPP/RGA buffers."
-        ),
-    )
-    parser.add_argument(
         "--encrypt",
         action=argparse.BooleanOptionalAction,
         default=deploy.rknn_encrypt,
@@ -118,19 +113,6 @@ def parse_args():
     )
     add_eval_args(parser)
     return parser.parse_args()
-
-
-def _warn_input_nv12_enabled(*, for_eval: bool) -> None:
-    print(
-        "WARNING: --input-nv12 injects yuv2rgb at the graph top (Y + UV inputs). "
-        "Expect a larger RKNN model and extra NPU/CPU work vs RGB input. "
-        "Training/calibration remain RGB; board-side NV12 must match MPP/RGA layout."
-    )
-    if for_eval:
-        print(
-            "WARNING: NV12 accuracy in the PC simulator uses RGB→NV12 conversion and "
-            "does not match real decoder buffers — treat simulator PSNR as non-authoritative."
-        )
 
 
 def _warn_nhwc_onnx_output(onnx_path: Path) -> None:
@@ -184,8 +166,6 @@ def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
     }
     if do_quantization:
         kwargs["quantized_method"] = args.quantized_method
-    if args.input_nv12:
-        kwargs["inputs_yuv_fmt"] = ["nv12"]
     return kwargs
 
 
@@ -305,7 +285,7 @@ def main():
     if needs_rknn_reexec(rknn_python):
         reexec_in_rknn_python(rknn_python, sys.argv[1:])
 
-    RKNN = import_rknn()
+    rknn_class = import_rknn()
     do_quantization = args.do_quantization and not args.no_quantization
     args.calib_dir = _resolve_calib_dir(args.calib_dir)
     _parse_input_size(args.input_size)
@@ -316,12 +296,10 @@ def main():
         sys.exit(1)
     quant_mode = "INT8+FP16 hybrid" if use_hybrid else ("INT8" if do_quantization else "FP16")
 
-    rknn = RKNN(verbose=True)
+    rknn = rknn_class(verbose=True)
     try:
         print("--> Config model")
-        if args.input_nv12:
-            _warn_input_nv12_enabled(for_eval=args.eval)
-            print("--> Input format: NV12 (yuv2rgb injected at graph top)")
+        print("--> Input format: MLVC BT.709 YCbCr444")
         _warn_nhwc_onnx_output(onnx_path)
         ret = rknn.config(**_config_kwargs(args, do_quantization=do_quantization))
         if ret != 0:

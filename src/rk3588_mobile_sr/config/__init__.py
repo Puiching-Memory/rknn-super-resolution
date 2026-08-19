@@ -23,25 +23,28 @@ class ModelConfig:
 
 @dataclass
 class DataConfig:
-    codec_manifest: str = "data/codec_cache/manifest.jsonl"
-    val_manifest: str = "data/sources/manifests/val_fixed.jsonl"
+    dataset_description: str = "data/OpenVidHD/openvidhd_60k_train64/description.json"
+    mlvc_repo: str = "third_party/mlvc"
+    mlvc_checkpoint: str = "data/mlvc/mlvc-s-psnr-v1.ckpt"
+    mlvc_variant: str = "small"
+    sequence_frames: int = 8
+    q_indices: tuple[int, ...] = (0, 21, 42, 63)
+    val_fraction: float = 0.01
+    val_samples: int = 16
+    split_seed: int = 42
     lr_size: tuple[int, int] = (360, 640)
     hr_size: tuple[int, int] = (1080, 1920)
     colorspace: str = "yuv"
-    nv12_simulate: bool = True
     augment: bool = True
-    decode: str = "auto"
-    decode_num_workers: int = 4
-    prefetch_batches: int = 4
-    augment_rot90: bool = False
-    augment_lr_decode_noise: bool = False
-    augment_lr_jpeg: bool = False
+    num_workers: int = 4
+    prefetch_batches: int = 1
+    mlvc_amp: bool = True
 
 
 @dataclass
 class Stage1Config:
     patch_size: int = 128
-    batch_size: int = 16
+    batch_size: int = 2
     max_steps: int = 100_000
     early_stop_patience: int = 10
     early_stop_min_delta: float = 0.1
@@ -99,6 +102,8 @@ def _merge_dataclass(cls: type, data: dict[str, Any] | None) -> Any:
         kwargs["lr_size"] = tuple(kwargs["lr_size"])
     if cls is DataConfig and "hr_size" in kwargs:
         kwargs["hr_size"] = tuple(kwargs["hr_size"])
+    if cls is DataConfig and "q_indices" in kwargs:
+        kwargs["q_indices"] = tuple(kwargs["q_indices"])
     return cls(**kwargs)
 
 

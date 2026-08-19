@@ -1,7 +1,7 @@
 [project]
 name = "rk3588-mobile-sr"
 version = "0.1.0"
-description = "RK3588 MobileOne 3x SISR (360x640 -> 1080x1920) with CUDA 13.2 PyTorch training"
+description = "RK3588 frozen-MLVC video reconstruction and MobileOne 3x super-resolution"
 readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
@@ -22,10 +22,7 @@ dependencies = [
     "pre-commit>=3.7",
     "pytest>=8.0",
     "ruff>=0.6.0",
-    "kornia>=0.8.3",
     "pyiqa>=0.1.15.post2",
-    "pydantic>=2",
-    "snakemake>=8",
 ]
 
 # RKNN conversion is typically done in a separate environment because
@@ -36,17 +33,12 @@ dependencies = [
 rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
 rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
 rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
-rk3588-build-train-manifest = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
-rk3588-build-val-codec-fixed = "rk3588_mobile_sr.data_pipeline.discover_sources:main"
-rk3588-build-codec-cache = "rk3588_mobile_sr.data_pipeline.cli:main"
 rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
 rk3588-relu-audit = "rk3588_mobile_sr.deploy.relu_audit:main"
 rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
-rk3588-profile-stage1 = "rk3588_mobile_sr.dev.profile_stage1:main"
-rk3588-bench-dataloader = "rk3588_mobile_sr.dev.bench_dataloader:main"
-rk3588-bench-ddp = "rk3588_mobile_sr.dev.bench_ddp:main"
+rk3588-build-rknn-calibration = "rk3588_mobile_sr.dev.build_mlvc_calibration:main"
 rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:main"
 
 [tool.uv.sources]

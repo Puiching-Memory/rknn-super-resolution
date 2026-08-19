@@ -1,7 +1,5 @@
 """Tests for RKNN dedicated Python resolution."""
 
-from pathlib import Path
-
 from rk3588_mobile_sr.deploy.rknn_env import (
     RKNN_PYTHON_ENV,
     _project_root,

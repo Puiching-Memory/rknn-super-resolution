@@ -18,15 +18,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from rk3588_mobile_sr.data.types import ValSampleMeta
-from rk3588_mobile_sr.data.val_loader import (
-    FixedValDataset,
-    iter_val_batches,
-    select_val_vis_indices,
-    val_sample_meta,
-)
 from rk3588_mobile_sr.data.yuv_utils import colorspace_roundtrip_rgb
 from rk3588_mobile_sr.utils.run_logger import logger
+from rk3588_mobile_sr.utils.sr_metrics import iter_val_batches
 
 _active = False
 _run_id: str | None = None
@@ -419,7 +413,7 @@ def _paste_zoom_in_column(
 
 
 def upscale_lr_canvas(lr: torch.Tensor, hr_hw: tuple[int, int]) -> torch.Tensor:
-    """Upscale codec LR canvas to HR size for side-by-side visualization."""
+    """Upscale MLVC LR to HR size for side-by-side visualization."""
     return F.interpolate(
         lr.unsqueeze(0),
         size=hr_hw,
@@ -427,7 +421,7 @@ def upscale_lr_canvas(lr: torch.Tensor, hr_hw: tuple[int, int]) -> torch.Tensor:
     )[0]
 
 
-def make_codec_canvas_panel(
+def make_sr_panel(
     lr: torch.Tensor,
     sr: torch.Tensor,
     hr: torch.Tensor,
@@ -437,7 +431,7 @@ def make_codec_canvas_panel(
     zoom_scale: int = 4,
     include_detail: bool = True,
 ) -> np.ndarray:
-    """Build codec-canvas validation panel: LR(NN x3) | SR | HR (+ optional error row)."""
+    """Build an MLVC LR | MobileOneSR | HR panel with an optional error row."""
     hr_hw = hr.shape[-2:]
     lr_up = upscale_lr_canvas(lr, hr_hw)
     lr_np = chw_tensor_to_uint8_hwc(lr_up)
@@ -489,10 +483,10 @@ def make_data_preview_panel(
     zoom_fraction: float = 0.25,
     zoom_scale: int = 4,
 ) -> np.ndarray:
-    """Build pre-training codec downsample preview with colorspace roundtrip check.
+    """Build an MLVC reconstruction preview with a colorspace roundtrip check.
 
-    Top row: codec LR (NN x3) | HR decode | HR after train colorspace roundtrip
-    Bottom row: err(codec LR↑) | err(colorspace roundtrip) | zoom(HR|roundtrip)@max-error
+    Top row: MLVC LR (NN x3) | HR target | HR after train colorspace roundtrip.
+    Bottom row: MLVC error | colorspace error | max-error detail crop.
     """
     hr_hw = hr_rgb.shape[-2:]
     lr_up = upscale_lr_canvas(lr_rgb, hr_hw)
@@ -525,74 +519,55 @@ def make_data_preview_panel(
 def data_preview_caption(*, colorspace: str) -> str:
     roundtrip = "YUV↔RGB roundtrip" if colorspace == "yuv" else "RGB identity"
     return (
-        "codec LR (NN x3) | HR decode | HR after colorspace roundtrip\n"
-        f"err(codec LR↑) | err({roundtrip}) | zoom(HR|roundtrip)@max-error"
+        "MLVC LR (NN x3) | HR target | HR after colorspace roundtrip\n"
+        f"err(MLVC LR↑) | err({roundtrip}) | zoom(HR|roundtrip)@max-error"
     )
-
-
-def make_sr_panel(
-    lr: torch.Tensor,
-    sr: torch.Tensor,
-    hr: torch.Tensor,
-    **kwargs: Any,
-) -> np.ndarray:
-    """Backward-compatible alias for codec canvas panels."""
-    return make_codec_canvas_panel(lr, sr, hr, **kwargs)
 
 
 @dataclass(frozen=True)
 class DataPreviewSample:
-    meta: ValSampleMeta
+    index: int
     panel: np.ndarray
     stats: dict[str, float]
 
 
 def collect_data_preview_samples(
-    dataset: FixedValDataset,
+    val_loader: Iterator[tuple[torch.Tensor, torch.Tensor]],
     *,
-    indices: list[int],
+    num_samples: int,
     colorspace: str = "yuv",
     error_gain: float = 8.0,
 ) -> list[DataPreviewSample]:
-    """Build codec downsample preview panels before training (no model inference)."""
-    if not indices:
+    """Build preview panels from frozen-MLVC validation batches."""
+    if num_samples <= 0:
         return []
 
-    lr_h, lr_w = dataset.settings.lr_size
-    hr_h, hr_w = dataset.settings.hr_size
     samples: list[DataPreviewSample] = []
-    for index in indices:
-        lr_rgb, hr_rgb = dataset.decode_rgb_pair(index)
-        panel = make_data_preview_panel(
-            lr_rgb,
-            hr_rgb,
-            colorspace=colorspace,
-            error_gain=error_gain,
-        )
-        lr_up = upscale_lr_canvas(lr_rgb, hr_rgb.shape[-2:])
-        lr_np = chw_tensor_to_uint8_hwc(lr_up)
-        hr_np = chw_tensor_to_uint8_hwc(hr_rgb)
-        hr_rt_np = chw_tensor_to_uint8_hwc(colorspace_roundtrip_rgb(hr_rgb, colorspace))
-        codec_stats = rgb_diff_stats(lr_np, hr_np)
-        roundtrip_stats = rgb_diff_stats(hr_np, hr_rt_np)
-        meta = val_sample_meta(
-            dataset.specs[index],
-            lr_size=(lr_h, lr_w),
-            hr_size=(hr_h, hr_w),
-        )
-        samples.append(
-            DataPreviewSample(
-                meta=meta,
-                panel=panel,
-                stats={
-                    "codec_lr_psnr": codec_stats["psnr"],
-                    "codec_lr_mean_abs": codec_stats["mean_abs"],
-                    "colorspace_roundtrip_psnr": roundtrip_stats["psnr"],
-                    "colorspace_roundtrip_mean_abs": roundtrip_stats["mean_abs"],
-                    "colorspace_roundtrip_max_abs": roundtrip_stats["max_abs"],
-                },
+    for lr, hr in val_loader:
+        for offset in range(lr.shape[0]):
+            lr_rgb = colorspace_to_rgb(lr[offset], colorspace)
+            hr_rgb = colorspace_to_rgb(hr[offset], colorspace)
+            panel = make_data_preview_panel(
+                lr_rgb,
+                hr_rgb,
+                colorspace="rgb",
+                error_gain=error_gain,
             )
-        )
+            lr_np = chw_tensor_to_uint8_hwc(upscale_lr_canvas(lr_rgb, hr_rgb.shape[-2:]))
+            hr_np = chw_tensor_to_uint8_hwc(hr_rgb)
+            lr_stats = rgb_diff_stats(lr_np, hr_np)
+            samples.append(
+                DataPreviewSample(
+                    index=len(samples),
+                    panel=panel,
+                    stats={
+                        "mlvc_lr_psnr": lr_stats["psnr"],
+                        "mlvc_lr_mean_abs": lr_stats["mean_abs"],
+                    },
+                )
+            )
+            if len(samples) >= num_samples:
+                return samples
     return samples
 
 
@@ -608,48 +583,32 @@ def log_data_preview_samples(
     *,
     step: int = 0,
     max_size: int = 768,
-    colorspace: str = "yuv",
     save_dir: Path | None = None,
 ) -> dict[str, float]:
-    """Upload data preview panels and aggregate colorspace diagnostic metrics."""
+    """Upload frozen-MLVC input previews and aggregate degradation metrics."""
     if not samples:
         return {}
 
     aggregate = {
-        "data_preview/codec_lr_psnr": float(
-            np.mean([sample.stats["codec_lr_psnr"] for sample in samples])
+        "data_preview/mlvc_lr_psnr": float(
+            np.mean([sample.stats["mlvc_lr_psnr"] for sample in samples])
         ),
-        "data_preview/codec_lr_mean_abs": float(
-            np.mean([sample.stats["codec_lr_mean_abs"] for sample in samples])
-        ),
-        "data_preview/colorspace_roundtrip_psnr": float(
-            np.mean([sample.stats["colorspace_roundtrip_psnr"] for sample in samples])
-        ),
-        "data_preview/colorspace_roundtrip_mean_abs": float(
-            np.mean([sample.stats["colorspace_roundtrip_mean_abs"] for sample in samples])
-        ),
-        "data_preview/colorspace_roundtrip_max_abs": float(
-            np.max([sample.stats["colorspace_roundtrip_max_abs"] for sample in samples])
+        "data_preview/mlvc_lr_mean_abs": float(
+            np.mean([sample.stats["mlvc_lr_mean_abs"] for sample in samples])
         ),
     }
 
     if save_dir is not None:
         preview_dir = save_dir / "data_preview"
         for sample in samples:
-            _save_preview_png(sample.panel, preview_dir / f"{sample.meta.slug}.png")
+            _save_preview_png(sample.panel, preview_dir / f"sample_{sample.index:03d}.png")
 
     if _active:
         payload: dict[str, Any] = {}
         for sample in samples:
-            header = sample.meta.data_preview_header(colorspace=colorspace)
-            caption = (
-                header
-                + "\n"
-                + data_preview_caption(colorspace=colorspace).split("\n", 1)[1]
-            )
-            payload[f"data_preview/{sample.meta.slug}"] = swanlab.Image(
+            payload[f"data_preview/sample_{sample.index:03d}"] = swanlab.Image(
                 sample.panel,
-                caption=caption,
+                caption=data_preview_caption(colorspace="rgb"),
                 size=max_size,
             )
         swanlab.log(payload, step=step)
@@ -668,16 +627,10 @@ def run_training_data_preview(
     save_dir: Path | None = None,
     step: int = 0,
 ) -> dict[str, float]:
-    """Collect and log codec downsample previews from the fixed val set."""
-    dataset = val_loader.dataset
-    if not isinstance(dataset, FixedValDataset):
-        logger.warning("data preview skipped: val loader is not FixedValDataset")
-        return {}
-
-    indices = select_val_vis_indices(dataset.specs, num_samples)
+    """Collect and log frozen-MLVC reconstructions before training."""
     samples = collect_data_preview_samples(
-        dataset,
-        indices=indices,
+        iter_val_batches(val_loader),
+        num_samples=num_samples,
         colorspace=colorspace,
         error_gain=error_gain,
     )
@@ -685,75 +638,16 @@ def run_training_data_preview(
         samples,
         step=step,
         max_size=max_size,
-        colorspace=colorspace,
         save_dir=save_dir,
     )
     if metrics:
         logger.info(
-            "data preview ({} samples): codec LR PSNR={:.2f} dB | "
-            "colorspace roundtrip PSNR={:.2f} dB mean_abs={:.3f} max_abs={:.1f}",
+            "data preview ({} samples): MLVC LR PSNR={:.2f} dB mean_abs={:.3f}",
             len(samples),
-            metrics["data_preview/codec_lr_psnr"],
-            metrics["data_preview/colorspace_roundtrip_psnr"],
-            metrics["data_preview/colorspace_roundtrip_mean_abs"],
-            metrics["data_preview/colorspace_roundtrip_max_abs"],
+            metrics["data_preview/mlvc_lr_psnr"],
+            metrics["data_preview/mlvc_lr_mean_abs"],
         )
     return metrics
-
-
-@dataclass(frozen=True)
-class ValVisSample:
-    meta: ValSampleMeta
-    panel: np.ndarray
-
-
-@torch.no_grad()
-def collect_codec_val_vis_samples(
-    model: nn.Module,
-    dataset: FixedValDataset,
-    device: torch.device,
-    *,
-    indices: list[int],
-    colorspace: str = "yuv",
-    error_gain: float = 8.0,
-    include_detail: bool = True,
-) -> list[ValVisSample]:
-    """Run inference on selected fixed-val indices and build labeled panels."""
-    if not indices:
-        return []
-
-    unwrap = getattr(model, "module", model)
-    was_training = unwrap.training
-    unwrap.eval()
-
-    lr_h, lr_w = dataset.settings.lr_size
-    hr_h, hr_w = dataset.settings.hr_size
-    samples: list[ValVisSample] = []
-    for index in indices:
-        lr, hr = dataset[index]
-        lr = lr.to(device, non_blocking=True)
-        hr = hr.to(device, non_blocking=True)
-        sr = torch.clamp(unwrap(lr.unsqueeze(0)), 0.0, 255.0)[0]
-        lr_rgb = colorspace_to_rgb(lr, colorspace)
-        sr_rgb = colorspace_to_rgb(sr, colorspace)
-        hr_rgb = colorspace_to_rgb(hr, colorspace)
-        meta = val_sample_meta(
-            dataset.specs[index],
-            lr_size=(lr_h, lr_w),
-            hr_size=(hr_h, hr_w),
-        )
-        panel = make_codec_canvas_panel(
-            lr_rgb,
-            sr_rgb,
-            hr_rgb,
-            error_gain=error_gain,
-            include_detail=include_detail,
-        )
-        samples.append(ValVisSample(meta=meta, panel=panel))
-
-    if was_training:
-        unwrap.train()
-    return samples
 
 
 @torch.no_grad()
@@ -767,7 +661,7 @@ def collect_sr_validation_panels(
     include_detail: bool = True,
     colorspace: str = "rgb",
 ) -> list[np.ndarray]:
-    """Legacy iterator-based panel collection for simple tensor loaders."""
+    """Collect MobileOneSR panels from processed MLVC validation batches."""
     if num_samples <= 0:
         return []
 
@@ -785,7 +679,7 @@ def collect_sr_validation_panels(
             sr_rgb = colorspace_to_rgb(sr[i], colorspace)
             hr_rgb = colorspace_to_rgb(hr[i], colorspace)
             panels.append(
-                make_codec_canvas_panel(
+                make_sr_panel(
                     lr_rgb,
                     sr_rgb,
                     hr_rgb,
@@ -803,54 +697,16 @@ def collect_sr_validation_panels(
     return panels
 
 
-def save_val_vis_samples(
-    samples: list[ValVisSample],
+def save_sr_panels(
+    panels: list[np.ndarray],
     save_dir: Path,
     *,
     subdir: str = "sr_preview",
 ) -> Path:
-    """Write LR|SR|HR panels to ``{save_dir}/{subdir}/{slug}.png``."""
+    """Write MLVC LR | SR | HR panels under ``save_dir/subdir``."""
     preview_dir = Path(save_dir) / subdir
-    for sample in samples:
-        _save_preview_png(sample.panel, preview_dir / f"{sample.meta.slug}.png")
-    return preview_dir
-
-
-def log_val_vis_samples(
-    samples: list[ValVisSample],
-    *,
-    step: int,
-    max_size: int = 768,
-    include_detail: bool = True,
-    key_prefix: str = "val",
-    save_dir: Path | None = None,
-    save_subdir: str = "sr_preview",
-) -> Path | None:
-    """Upload codec-canvas validation panels to SwanLab with per-sample keys.
-
-    When ``save_dir`` is set, also write PNGs under ``{save_dir}/{save_subdir}/``.
-    """
-    preview_dir: Path | None = None
-    if save_dir is not None and samples:
-        preview_dir = save_val_vis_samples(samples, save_dir, subdir=save_subdir)
-
-    if not _active or not samples:
-        return preview_dir
-
-    detail_note = (
-        "\nerr(codec LR↑) | err(SR) | zoom(SR|HR)@max-error"
-        if include_detail
-        else ""
-    )
-    payload: dict[str, Any] = {}
-    for sample in samples:
-        caption = sample.meta.caption() + detail_note
-        payload[f"{key_prefix}/{sample.meta.slug}"] = swanlab.Image(
-            sample.panel,
-            caption=caption,
-            size=max_size,
-        )
-    swanlab.log(payload, step=step)
+    for index, panel in enumerate(panels):
+        _save_preview_png(panel, preview_dir / f"sample_{index:03d}.png")
     return preview_dir
 
 
@@ -861,17 +717,24 @@ def log_sr_panels(
     key_prefix: str = "val/sample",
     max_size: int = 768,
     include_detail: bool = True,
-) -> None:
+    save_dir: Path | None = None,
+    save_subdir: str = "sr_preview",
+) -> Path | None:
     """Upload generic SR panels to SwanLab."""
+    preview_dir = (
+        save_sr_panels(panels, save_dir, subdir=save_subdir)
+        if save_dir is not None and panels
+        else None
+    )
     if not _active or not panels:
-        return
+        return preview_dir
 
     detail_note = (
-        "\nerr(codec LR↑) | err(SR) | zoom(SR|HR)@max-error"
+        "\nerr(MLVC LR↑) | err(SR) | zoom(SR|HR)@max-error"
         if include_detail
         else ""
     )
-    caption = f"codec LR (NN x3) | SR | HR{detail_note}"
+    caption = f"MLVC LR (NN x3) | MobileOneSR | HR{detail_note}"
 
     payload: dict[str, Any] = {}
     for i, panel in enumerate(panels):
@@ -881,6 +744,7 @@ def log_sr_panels(
             size=max_size,
         )
     swanlab.log(payload, step=step)
+    return preview_dir
 
 
 def log_validation_sr_images(
@@ -899,29 +763,6 @@ def log_validation_sr_images(
     save_subdir: str = "sr_preview",
 ) -> None:
     """Collect and upload validation visualizations to SwanLab."""
-    dataset = val_loader.dataset
-    if isinstance(dataset, FixedValDataset):
-        indices = select_val_vis_indices(dataset.specs, num_samples)
-        samples = collect_codec_val_vis_samples(
-            model,
-            dataset,
-            device,
-            indices=indices,
-            colorspace=colorspace,
-            error_gain=error_gain,
-            include_detail=include_detail,
-        )
-        log_val_vis_samples(
-            samples,
-            step=step,
-            max_size=max_size,
-            include_detail=include_detail,
-            key_prefix=key_prefix,
-            save_dir=save_dir,
-            save_subdir=save_subdir,
-        )
-        return
-
     panels = collect_sr_validation_panels(
         model,
         iter_val_batches(val_loader),
@@ -934,8 +775,11 @@ def log_validation_sr_images(
     log_sr_panels(
         panels,
         step=step,
+        key_prefix=f"{key_prefix}/sample",
         max_size=max_size,
         include_detail=include_detail,
+        save_dir=save_dir,
+        save_subdir=save_subdir,
     )
 
 
@@ -961,11 +805,6 @@ def run_final_sr_preview(
         _training_module_for_state_dict,
     )
 
-    dataset = val_loader.dataset
-    if not isinstance(dataset, FixedValDataset):
-        logger.warning("final sr preview skipped: val loader is not FixedValDataset")
-        return None
-
     unwrap = _training_module_for_state_dict(model)
     if checkpoint is not None and checkpoint.is_file():
         raw = torch.load(checkpoint, map_location=device, weights_only=False)
@@ -981,26 +820,25 @@ def run_final_sr_preview(
         step = ckpt_step
         logger.info("final sr preview loading {}", checkpoint)
 
-    indices = select_val_vis_indices(dataset.specs, num_samples)
-    samples = collect_codec_val_vis_samples(
+    panels = collect_sr_validation_panels(
         model,
-        dataset,
+        iter_val_batches(val_loader),
         device,
-        indices=indices,
+        num_samples=num_samples,
         colorspace=colorspace,
     )
-    preview_dir = log_val_vis_samples(
-        samples,
+    preview_dir = log_sr_panels(
+        panels,
         step=step,
+        key_prefix="sr_preview/sample",
         max_size=max_size,
-        key_prefix="sr_preview",
         save_dir=save_dir,
         save_subdir="sr_preview",
     )
     if preview_dir is not None:
         logger.info(
             "final sr preview ({} samples @ step {}): {}",
-            len(samples),
+            len(panels),
             step,
             preview_dir,
         )

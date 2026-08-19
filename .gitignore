@@ -102,6 +102,7 @@ wandb/
 # Local Netflix libvmaf install + clone (see ./scripts/setup_vmaf.sh)
 .local/
 third_party/vmaf/
+third_party/mlvc/
 
 # OS files
 .DS_Store

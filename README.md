@@ -1,351 +1,241 @@
-# RK3588 MobileOne 超分辨率 (MobileOneSR)
+# RK3588 MLVC + MobileOne 视频超分辨率
 
-面向 RK3588 NPU 部署的轻量级 3× 单帧超分辨率（SISR）方案：输入 360p（360×640），输出 1080p（1080×1920）。基于 MobileOne 重参数化卷积构建，支持 FP32 训练、知识蒸馏、QAT 量化感知训练，最终导出 ONNX 并转换为 RKNN INT8 模型在 RK3588 上推理。
-
-## 功能特性
-
-- **MobileOne 轻量骨干**：重参数化多分支结构，训练时多分支、推理时融合为单分支，兼顾精度与速度。
-- **两阶段训练流程**：
-  1. Stage 1：FP32 基线训练（L1 损失）
-  2. Stage 2：量化感知训练（QAT），产出 INT8 友好权重
-- **端到端部署**：支持 PyTorch → ONNX → RKNN 转换链路。
-- **RK3588 适配**：输入固定为 360×640，输出 1080×1920，便于接入视频后处理链路。
-- **SwanLab 实验追踪**：使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录 loss、PSNR 等训练指标，支持云端与本地可视化。
-- **TraceML 性能诊断**：使用 [TraceML](https://github.com/traceopt-ai/traceml) 跟踪每步 input/compute 耗时、DDP rank 偏斜与显存趋势，训练结束输出 `final_summary.json`。
-
-## 模型架构
+面向 RK3588 的 3× 视频超分辨率训练与部署工程。训练输入不是传统
+H.264/H.265/AV1 解码帧，而是冻结 **MLVC-S** 在真实 P-frame 状态传播和
+latent 量化之后的重建帧：
 
 ```text
-Input(3×360×640)
-    ↓
-Stem (Conv + BN + ReLU)
-    ↓
-MobileOne Block × N
-    ↓
-Global Skip Connection
-    ↓
-Out Conv → PixelShuffle(×3) → Hardtanh(0,255)
-Output(3×1080×1920)
+OpenVidHD 连续帧
+  -> 1920x1080 GT / Lanczos 下采样 640x360
+  -> 冻结 MLVC-S（DPB + round 量化闭环，不执行 rANS）
+  -> MobileOneSR x3
+  -> 1920x1080
 ```
 
-- 默认配置：`num_channels=32`, `num_blocks=8`, `num_conv_branches=4`, `scale=3`
-- 推理前调用 `model.switch_to_deploy()` 融合 MobileOne 分支。
+MLVC-S 要求空间尺寸对齐 16。对 640x360 输入，runtime 只在 MLVC 内部将
+底部 replicate-pad 到 640x368，重建后裁回 640x360。补边不进入
+MobileOneSR，也不改变 1920x1080 输出契约。
 
-## 目录结构
+## 关键设计
 
+- 数据集使用与 MLVC 相同的 OpenVidHD 60k x 64 frame sequences。
+- 每个样本读取连续帧，首帧作为干净 DPB reference，后续帧保持
+  `ref_frame`、`ref_feature` 闭环传播。
+- MLVC 使用 eval 模式的真实 `round` 量化；训练直接调用 `compress_core()`，
+  跳过 bit-estimate、rANS 和码流封装，因而不产生传统 codec cache。
+- 默认从 MLVC 的 64 个质量点中采样 `[0, 21, 42, 63]`。
+- MobileOneSR 默认在 MLVC BT.709 full-range YCbCr444 张量上训练。
+- 训练保持 step-based DDP；验证、日志和 checkpoint 只在 collective 完成后
+  进入 rank 0 段。
+- 推理前执行 `switch_to_deploy()`，导出固定 360x640 输入的 ONNX/RKNN。
+
+## 目录
+
+```text
+src/rk3588_mobile_sr/
+├── config/                 默认 YAML 配置
+├── data/
+│   ├── openvid.py          OpenVidHD 连续序列读取
+│   ├── mlvc_runtime.py     冻结 MLVC-S 无码流量化闭环
+│   ├── mlvc_loader.py      CPU 读帧 + GPU MLVC batch processor
+│   └── yuv_utils.py        BT.709 full-range YCbCr444
+├── models/                 MobileOneSR 与 QAT
+├── train/                  StepTrainer、Stage 1/2
+├── distributed/            DDP 与 rank 0 同步原语
+├── deploy/                 ONNX、RKNN 与精度验证
+└── utils/                  指标、SwanLab、TraceML
+
+scripts/
+├── setup_mlvc.sh           固定 MLVC 源码、权重与 OpenVidHD 索引
+├── run_stage1_8gpu.sh      Stage 1 DDP
+└── setup_vmaf.sh           可选 VMAF 环境
 ```
-rk3588_mobile_sr/
-├── src/rk3588_mobile_sr/          # 可安装包（src layout）
-│   ├── cli.py                     # 统一 CLI 入口
-│   ├── config/                    # YAML 配置加载
-│   ├── data/                      # 训练期 manifest / loader（codec_index、raw .npy）
-│   ├── data_pipeline/             # 离线 codec cache 构建（Snakemake 配套 Python）
-│   ├── models/                    # MobileOneSR 模型与 QAT 工具
-│   ├── losses/                    # 训练损失函数
-│   ├── utils/                     # 训练框架、指标、日志
-│   ├── distributed/               # DDP 上下文、验证、同步原语
-│   ├── train/                     # StepTrainer、TrainSession、Stage 1/2
-│   ├── eval/                      # PSNR/SSIM 评测
-│   └── deploy/                    # ONNX 导出 + RKNN 转换与精度评测
-├── scripts/                       # 运维 bash 入口 + pipeline/Snakefile
-├── tests/                         # 单元测试
-├── docs/
-├── pyproject.toml
-└── README.md
-```
 
-## 环境安装
+项目已删除传统 codec manifest、离线 mp4/.npy cache、Snakemake 和
+`--decode` 等旧接口。
 
-本项目使用 `uv` 管理依赖，Python 版本要求 `3.12.*`，训练环境固定为 **CUDA 13.0（cu130）**，需要 NVIDIA GPU。
+## 环境
+
+项目只使用 `uv` 管理主训练环境：
 
 ```bash
 uv sync
+uv run pytest
+uv run ruff check src tests
 ```
 
-开发依赖（ruff、pytest、pre-commit）：
+Python 要求 3.12。PyTorch CUDA wheel 源以 `pyproject.toml` 为准。
+RKNN Toolkit 与主环境的 torch 版本冲突，应继续使用独立
+`.venv-rknn`。
+
+MLVC 不是主项目依赖包。本项目动态加载
+`third_party/mlvc/video/src`，避免把 MLVC 自己的 torch 锁定并入主环境。
+
+## 准备 MLVC
 
 ```bash
-uv sync
+./scripts/setup_mlvc.sh
 ```
 
-PyTorch wheel 源已在 `pyproject.toml` 中配置（`cu132`）。
-> RKNN 转换建议在独立环境中安装 `rknn-toolkit2`，因为它对 torch/onnx 的版本限制与本项目训练依赖冲突。
+脚本会：
 
-## CLI 用法
+1. 将 MLVC 固定到 commit
+   `e9f0114d71e886d7952af2a7a3c20b680443925f`。
+2. 下载 `mlvc-s-psnr-v1.ckpt` 并校验官方 SHA256。
+3. 下载官方 `openvidhd_60k64_frame_sequences.csv`。
 
-安装后可通过统一 CLI 调用各子命令（参数与原先脚本一致）：
-
-```bash
-# 查看帮助
-uv run rk3588-mobile-sr --help
-
-# 训练（DDP 仍用 torchrun 包装；离线 LR/HR .npy，纯 CPU mmap）
-torchrun --nproc_per_node=3 rk3588-mobile-sr train stage1 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --decode auto \
-  ...
-
-# 评测 / 导出
-uv run rk3588-mobile-sr eval --weight checkpoints/stage1/best.pth ...
-uv run rk3588-mobile-sr export-onnx --weight checkpoints/stage1/best.pth ...
-```
-
-也保留了独立入口别名：`rk3588-train-stage1`、`rk3588-eval-psnr` 等。
-
-## 数据准备
-
-训练数据由 **manifest JSONL** 描述原生视频源（UVG 1080p YUV420p）。离线管线由 **Snakemake** 编排：编码 LR codec mp4 + 无损 HR mp4，再统一烘焙成 RGB `.npy`；训练/验证只读 `data/raw_cache/*_{lr,hr}.npy`（一套格式、一套 loader）。
-
-```bash
-# 一键：发现源 -> 写 manifest -> Snakemake 构建 codec cache + raw .npy
-./scripts/build_data.sh
-
-# 或分步：
-uv run rk3588-build-train-manifest    # train.jsonl + val_fixed.jsonl（同一 discover 脚本）
-uv run rk3588-build-codec-cache       # snakemake -j$(nproc) all
-
-# 仅刷新 manifest（已有 .npy，不重解码）：
-uv run python -m rk3588_mobile_sr.data_pipeline.write_codec_manifest \
-  --root . \
-  --train-manifest data/sources/manifests/train.jsonl \
-  --output data/codec_cache/manifest.jsonl \
-  --raw-cache-dir data/raw_cache
-```
-
-`build_data.sh` 支持环境变量：`WORKERS`、`CLIPS_PER_VIDEO`、`BITRATES`；干跑传 `./scripts/build_data.sh -- -n`。
-
-目录结构示例：
-
-```
-data/
-├── sources/manifests/
-│   ├── train.jsonl              # UVG YUV 源
-│   └── val_fixed.jsonl          # 固定 UVG 验证行
-├── codec_cache/manifest.jsonl   # 索引（path→LR .npy，hr_path→HR .npy）
-├── codec_cache/*.mp4            # 中间 LR codec clips（离线解码用）
-├── raw_cache/*_lr.npy           # 烘焙 LR RGB（训练/验证）
-├── raw_cache/*_hr.npy           # 烘焙 HR RGB（训练/验证，按 clip 共享）
-├── hr_lossless/*_s{clip}_hr.mp4 # 离线 degrade / HR bake 用的无损 HR
-└── UVG_raw/yuv_1080p/           # 原始 1080p YUV420（仅离线管线输入）
-
-scripts/pipeline/
-├── Snakefile                    # discover -> hr_clip -> degrade -> decode_{lr,hr}_to_raw -> manifest
-├── config.yaml                  # codecs / bitrates / gop_candidates / clips 等
-└── ffmpeg/                      # hr_clip.sh（无损 HR 提取）
-```
-
-默认分辨率契约（与 deploy 对齐）：HR **1920×1080**，LR **640×360** canvas。训练数据管线为 **离线烘焙 + 纯 CPU mmap**：
-
-1. Snakemake 从原始 YUV 提取每 clip 的 **无损 H.264 HR**，再 degrade+encode 出 LR codec mp4；随后用同一套 `decode_to_raw` 把 **LR/HR mp4 都 bake 成 `.npy`**，写出 `codec_cache/manifest.jsonl`
-2. 训练采样按码率/GOP 分布抽 clip；**另外**为 `val_fixed.jsonl` 的每个 `(序列×编码器×码率)` 在固定 `clip_start` 上单独 bake，保证验证帧落在真实压缩窗口内（禁止干净下采样 fallback）
-3. 训练/验证 `decode=auto|raw`：**LR/HR 都 mmap 读 `.npy`**（patch 训练时再窗口裁剪），运行时零视频解码、也不再读 YUV。不引入 PyAV / DALI。
-
-退化链顺序模拟真实视频采集：HR 无损 -> 光学低通模糊 -> 传感器噪声 -> 混合下采样核（area/bicubic/lanczos）-> codec 编码；在线 augment 只保留压缩后的 JPEG/解码噪声，物理顺序正确。GOP 与码率按真实分布采样（log-normal 码率、加权 GOP 候选），I/P 帧在 `expand_codec_clip_frames` 中加权（P 帧权重更高以多见块效应）。
-
-### Bash 脚本（`scripts/`）
-
-推荐用 `scripts/` 下的 bash 入口启动训练与数据准备（内部统一 `uv run` + `torchrun -m ...`）：
-
-| 脚本                                  | 用途                                            |
-| ------------------------------------- | ----------------------------------------------- |
-| `./scripts/build_data.sh`             | Snakemake 构建 train/val manifest + codec cache |
-| `./scripts/run_stage1_8gpu.sh`        | Stage 1 八卡 DDP 训练                           |
-| `./scripts/bench_dataloader.sh`       | 单卡 DataLoader 吞吐                            |
-| `./scripts/bench_ddp.sh`              | 多卡 DDP step 吞吐                              |
-| `./scripts/profile_stage1.sh`         | 数据 vs 计算耗时剖析                            |
-| `./scripts/generate_report_charts.sh` | 从 `stage1_metrics.json` 生成报告图             |
-
-环境变量示例：`SAVE_DIR`、`NPROC`、`RESUME`、`TRAIN_EXPERIMENT_NAME`、`EXTRA_ARGS`。
-
-## 训练流程
-
-训练脚本使用 [SwanLab](https://github.com/SwanHubX/SwanLab) 记录实验指标。DDP 训练仅在 rank 0 上初始化 SwanLab，日志写入 `<save_dir>/swanlog/` 并同步至 SwanLab 云端（首次使用需按提示登录）。
-
-训练过程文本日志由 [loguru](https://github.com/Delgan/loguru) 写入 `<save_dir>/train.log`（每次启动覆盖），rank 0 在交互式终端下会同步输出到 stderr。**无需** `tee` 或 `TRAIN_PLAIN_LOG`；直接 `torchrun` 启动即可。
-
-### DDP 同步模型（step-based）
-
-三阶段训练共用同一套 **step-based** 循环（`StepTrainer`），由 `DistributedContext` 封装所有 collective，避免 rank 0 在验证后做日志/SwanLab/checkpoint 时与其他 rank 的 `broadcast` 死锁。
+源码和权重默认位于：
 
 ```text
-每个 training step:
-  所有 rank: forward + backward + optimizer.step
-  每 log_every: all_reduce_avg(loss) → rank0 写日志
-
-每 val_every step:
-  所有 rank: validate_ddp(_extended) + gather 指标
-  rank0_section:
-    rank0: deploy 检查 / SwanLab 图像 / best.pth
-    所有 rank: barrier
-  所有 rank: broadcast_bool(should_stop)  # 早停决策
+third_party/mlvc/
+data/mlvc/mlvc-s-psnr-v1.ckpt
 ```
 
-核心原语 `rank0_section`：**任何 rank0 独占逻辑必须在 collective 完成之后、且由 barrier 收尾**，禁止在 `broadcast` 之前让非 0 rank 等待。
+## 准备 OpenVidHD
 
-Stage 1 / Stage 2 默认启用 **早停**（验证 PSNR 连续若干次无提升则停止）；Stage 3 不启用早停。各阶段 `--max_steps` 为安全上限。
+OpenVidHD 原视频体量很大，`setup_mlvc.sh` 不会自动拉取全量数据。
+按照 MLVC 的
+`video/BUILD_TRAIN_DATASET.md` 准备 parts 10-28，跳过
+`*_part_ab`，并使用已下载的 60k x 64 CSV 执行官方步骤 6-8：
 
-```bash
-# 禁用 SwanLab
-torchrun --nproc_per_node=1 rk3588-mobile-sr train stage1 ... --no_swanlab
+1. 从 Hugging Face 的 `nkp37/OpenVid-1M/OpenVidHD` 下载 parts 10-28。
+2. 使用 MLVC `video/extract_frame_sequences.py` 抽取 WebP 连续帧。
+3. 使用 `video/build_dataset_description.py` 生成 `description.json`。
 
-# 指定实验名
-torchrun --nproc_per_node=1 rk3588-mobile-sr train stage1 ... --swanlab_experiment my-run-001
+最终目录必须满足：
+
+```text
+data/OpenVidHD/openvidhd_60k_train64/
+├── description.json
+├── frame_sequences.csv
+├── <sequence_id_00000>/
+│   ├── im00000.webp
+│   ├── im00001.webp
+│   └── ...
+└── ...
 ```
 
-### TraceML 训练性能诊断
+`description.json` 中的 `path` 相对该文件所在目录解析。训练/验证按
+sequence source 做稳定互斥切分，不会把同一 sequence 的帧分到两侧。
 
-训练脚本已集成 [TraceML](https://github.com/traceopt-ai/traceml)。用 `traceml run` 启动（替代 `torchrun`/`python`），训练结束后会在 `logs/<run_name>/` 生成 `final_summary.json` 与可读文本报告，用于定位 DataLoader 瓶颈、DDP rank 偏斜、显存泄漏等问题。
+## 配置
 
-```bash
-# 单卡
-traceml run rk3588-mobile-sr train stage1 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --save_dir ./checkpoints/stage1
+默认配置位于
+`src/rk3588_mobile_sr/config/mobileone_sr_x3.yaml`：
 
-# 多卡 DDP（TraceML 内置 --nproc-per-node，等价于 torchrun）
-traceml run rk3588-mobile-sr train stage1 --nproc-per-node=8 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --save_dir ./checkpoints/stage1
-
-# 实时终端面板
-traceml run rk3588-mobile-sr train stage1 --mode=cli --nproc-per-node=8 ...
-
-# 对比两次运行（例如调 num_workers 前后）
-traceml compare logs/run_a/final_summary.json logs/run_b/final_summary.json
+```yaml
+data:
+  dataset_description: data/OpenVidHD/openvidhd_60k_train64/description.json
+  mlvc_repo: third_party/mlvc
+  mlvc_checkpoint: data/mlvc/mlvc-s-psnr-v1.ckpt
+  mlvc_variant: small
+  sequence_frames: 8
+  q_indices: [0, 21, 42, 63]
+  lr_size: [360, 640]
+  hr_size: [1080, 1920]
+  colorspace: yuv
+  num_workers: 4
+  mlvc_amp: true
 ```
 
-- 通过 `traceml run` 启动时 TraceML **默认开启**；普通 `torchrun` 下可用 `--traceml` 手动开启 instrumentation，但完整 summary 仍需 `traceml run`。
-- 可用 `--no-traceml` 关闭；summary 指标会以 `traceml/...` 前缀同步到 SwanLab（若未禁用）。
-- Stage 2 同样支持：`traceml run rk3588-mobile-sr train stage2 ...`。
+CLI 可覆盖 `--dataset_description`、`--mlvc_repo`、
+`--mlvc_checkpoint`、`--sequence_frames`、`--q_indices` 和
+`--num_workers`。
 
-### Stage 1：FP32 基线
+## Stage 1
+
+推荐使用八卡入口：
 
 ```bash
-# 推荐：bash 入口（日志写入 checkpoints/stage1/console.log）
 ./scripts/run_stage1_8gpu.sh
+```
 
-# 或手动 torchrun（注意用 -m 模块路径，勿直接写 rk3588-mobile-sr 文件名）
+或直接启动模块：
+
+```bash
 uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.stage1 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --decode auto \
-  --batch_size 16 \
-  --lr 1e-3 \
-  --save_dir ./checkpoints/stage1
+  --dataset_description data/OpenVidHD/openvidhd_60k_train64/description.json \
+  --mlvc_repo third_party/mlvc \
+  --mlvc_checkpoint data/mlvc/mlvc-s-psnr-v1.ckpt \
+  --sequence_frames 8 \
+  --q_indices 0 21 42 63 \
+  --batch_size 2 \
+  --patch_size 128 \
+  --max_steps 100000 \
+  --save_dir checkpoints/stage1
 ```
 
-Stage 1 默认启用 **早停**：每 `--val_every`（1000）step 验证一次，主指标为 **VMAF v1**（默认标准 1080p / 3H 模型 [`vmaf_v1.0.16_3d0h`](https://github.com/Netflix/vmaf/blob/master/resource/doc/models_v1.md)；可用 `--vmaf_model phone` 切到 5H）。若连续 `--early_stop_patience`（10）次验证 VMAF 无提升（阈值 `--early_stop_min_delta` 0.1）则停止；`--max_steps`（100000）为安全上限。可用 `--no_early_stop` 改为只跑到 `max_steps`，或 `--no_vmaf` 退回 PSNR 主指标。
+每个 GPU 都持有独立冻结 MLVC-S。CPU workers 只读取连续图像并完成一致
+crop/flip，RGB->YCbCr、MLVC 重建和 patch crop 在对应 GPU 上执行。
 
-首次需要编译 Netflix libvmaf（安装到仓库 `.local/`）：
+Stage 1 默认每 1000 step 验证，使用 VMAF（可用 `--no_vmaf` 退回
+PSNR），并支持 SwanLab、TraceML、早停和 checkpoint resume。
 
-```bash
-./scripts/setup_vmaf.sh
-```
-
-### Stage 2：QAT 量化感知训练
-
-同样为 **step-based**。QAT 分三阶段，由 step 控制切换（非 epoch）：
-
-| 阶段    | step 范围                                | 行为                                |
-| ------- | ---------------------------------------- | ----------------------------------- |
-| Phase 1 | 1 – `phase1_steps` (3000)                | 训练 + 更新 observer                |
-| Phase 2 | `phase1_steps+1` – `phase2_steps` (9000) | 冻结 observer，继续 fake-quant 训练 |
-| Phase 3 | `phase2_steps+1` – `max_steps` (15000)   | 冻结 fake-quant，权重微调           |
+## Stage 2 QAT
 
 ```bash
-torchrun --nproc_per_node=1 rk3588-mobile-sr train stage2 \
+uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.stage2 \
   --stage1_weight checkpoints/stage1/best.pth \
-  --codec_manifest data/codec_cache/manifest.jsonl \
+  --dataset_description data/OpenVidHD/openvidhd_60k_train64/description.json \
+  --batch_size 1 \
   --max_steps 15000 \
-  --phase1_steps 3000 \
-  --phase2_steps 9000 \
-  --save_dir ./checkpoints/stage2_qat
+  --save_dir checkpoints/stage2_qat
 ```
 
-## 导出与评测
+Stage 2 仍复用同一个 MLVC loader 和 StepTrainer。BN 重校准结束后会释放该
+阶段的临时 loader/runtime，再创建带增强的正式训练 loader。
 
-### 导出 ONNX
+## ONNX 与 RKNN
+
+导出前会融合 MobileOne 分支：
 
 ```bash
-# FP32 ONNX
 uv run rk3588-mobile-sr export-onnx \
   --weight checkpoints/stage1/best.pth \
   --output mobileone_sr_x3.onnx \
-  --input_h 360 \
-  --input_w 640
-
-# QAT ONNX
-uv run rk3588-mobile-sr export-onnx \
-  --weight checkpoints/stage2_qat/best.pth \
-  --output mobileone_sr_x3_qat.onnx \
-  --qat \
-  --backend qnnpack \
+  --static \
   --input_h 360 \
   --input_w 640
 ```
 
-### 评测 PSNR/SSIM
+RKNN 模型输入和输出都是 BT.709 full-range YCbCr444，而不是 RGB/NV12。
+PTQ 校准数据必须来自同一输入域。使用冻结 MLVC-S 生成真实校准样本：
 
 ```bash
-uv run rk3588-mobile-sr eval \
-  --weight checkpoints/stage1/best.pth \
-  --hr_dir data/UVG_raw/yuv_1080p \
-  --lr_dir data/codec_cache \
-  --save_dir results/stage1
+uv run rk3588-build-rknn-calibration --samples 100
 ```
 
-## RKNN 部署转换
-
-> RKNN 转换与 FP32/INT8 精度对比见 `src/rk3588_mobile_sr/deploy/rknn.py`（需在独立 rknn-toolkit2 环境中运行）。
+随后在独立 RKNN 环境转换：
 
 ```bash
 uv run rk3588-mobile-sr convert-rknn \
   --onnx mobileone_sr_x3.onnx \
   --output mobileone_sr_x3.rknn \
   --target rk3588 \
-  --calib_dir data/rknn_calib.txt
+  --calib_dir data/rknn_calib.txt \
+  --weight checkpoints/stage1/best.pth
 ```
 
-转换完成后，将 `mobileone_sr_x3.rknn` 部署到 RK3588 上通过 `librknnrt.so` 进行推理。
+板端应将 MLVC 重建的 640x360 YCbCr444 三通道张量直接交给 RKNN。若
+MLVC 内部使用 640x368 对齐面，必须在 MLVC 重建后裁回有效 360 行，再交给
+MobileOneSR。真实码率评估应以可见像素数 640x360 归一化；补边不进入 SR loss
+或最终输出。
 
-## 配置说明
+## 训练同步不变量
 
-`src/rk3588_mobile_sr/config/mobileone_sr_x3.yaml` 中集中管理模型、数据、训练和部署参数，可通过 Python API 加载：
+```text
+每个 step:
+  所有 rank: MLVC reconstruction -> SR forward/backward -> optimizer
+  log step: all_reduce loss -> rank 0 日志
 
-```python
-from rk3588_mobile_sr.config import load_config
-cfg = load_config()  # 或 load_config("path/to/custom.yaml")
+每次验证:
+  所有 rank: validate + gather
+  rank0_section: SwanLab / preview / checkpoint
+  所有 rank: broadcast early-stop decision
 ```
 
-示例配置：
-
-```yaml
-model:
-  scale: 3
-  num_channels: 32
-  num_blocks: 8
-  num_conv_branches: 4
-
-deploy:
-  input_h: 360
-  input_w: 640
-  onnx_output: "mobileone_sr_x3.onnx"
-  rknn_output: "mobileone_sr_x3.rknn"
-```
-
-## 性能参考
-
-典型指标（以实际训练结果为准）：
-
-| 阶段    | 输入分辨率 | 输出分辨率 | 量化 | 部署方式          |
-| ------- | ---------- | ---------- | ---- | ----------------- |
-| Stage 1 | 360×640    | 1080×1920  | FP32 | ONNX / PyTorch    |
-| Stage 2 | 360×640    | 1080×1920  | INT8 | RKNN (RK3588 NPU) |
-
-详细的落地方案与性能分析见 [docs/RK3588_MobileOne_SR_落地方案.md](docs/RK3588_MobileOne_SR_落地方案.md)。
+任何 rank 0 独占操作都必须放在 collective 完成之后并由
+`rank0_section` 收尾。
 
 ## 许可证
 

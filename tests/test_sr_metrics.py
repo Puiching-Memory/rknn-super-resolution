@@ -22,7 +22,7 @@ def test_shave_borders_reduces_spatial_size():
     assert shaved.shape == (1, 3, 10, 10)
 
 
-def test_validation_metrics_to_log_dict_includes_fixed():
+def test_validation_metrics_to_log_dict():
     metrics = ValidationMetrics(
         psnr=30.0,
         y_psnr=31.0,
@@ -33,16 +33,10 @@ def test_validation_metrics_to_log_dict_includes_fixed():
         psnr_p50=30.0,
         psnr_p90=31.0,
         vmaf=72.5,
-        fixed_psnr={0: 29.5, 1: 30.2},
-        fixed_vmaf={0: 70.0, 1: 75.0},
     )
     logged = metrics.to_log_dict()
     assert logged["val/psnr"] == 30.0
     assert logged["val/vmaf"] == 72.5
-    assert logged["val/fixed_0_psnr"] == 29.5
-    assert logged["val/fixed_1_psnr"] == 30.2
-    assert logged["val/fixed_0_vmaf"] == 70.0
-    assert logged["val/fixed_1_vmaf"] == 75.0
 
 
 def test_y_psnr_runs_on_batch():

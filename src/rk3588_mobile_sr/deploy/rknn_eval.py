@@ -180,53 +180,34 @@ def _rknn_output_to_hwc(output: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 255.0)
 
 
-def rgb_to_nv12_planes(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """RGB HWC uint8 -> RKNN NV12 Y/UV planes as NHWC batches (1,H,W,1) and (1,H/2,W,1)."""
-    if rgb.ndim != 3 or rgb.shape[2] != 3:
-        raise ValueError(f"Expected RGB HWC image, got shape {rgb.shape}")
-    h, w = rgb.shape[:2]
-    if h % 2 != 0 or w % 2 != 0:
-        raise ValueError(f"NV12 requires even H and W, got {h}x{w}")
+def rgb_to_mlvc_ycbcr(rgb: np.ndarray) -> np.ndarray:
+    """Convert HWC RGB [0,255] to MLVC BT.709 full-range YCbCr."""
+    rgb_f = rgb.astype(np.float32)
+    r, g, b = rgb_f[..., 0], rgb_f[..., 1], rgb_f[..., 2]
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    cb = 0.5 * (b - y) / (1.0 - 0.0722) + 127.5
+    cr = 0.5 * (r - y) / (1.0 - 0.2126) + 127.5
+    return np.stack((y, cb, cr), axis=-1).clip(0.0, 255.0)
 
-    if cv2 is not None:
-        # Match standard NV12 packing (closer to MPP/RGA buffers than hand-rolled BT.601).
-        packed = cv2.cvtColor(rgb, cv2.COLOR_RGB2YUV_NV12)
-        y = packed[:h, :w]
-        uv = packed[h:, :w]
-    else:
-        rgb_f = rgb.astype(np.float32)
-        r, g, b = rgb_f[..., 0], rgb_f[..., 1], rgb_f[..., 2]
-        y = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0.0, 255.0).astype(np.uint8)
-        u = np.clip(-0.169 * r - 0.331 * g + 0.5 * b + 128.0, 0.0, 255.0).astype(np.uint8)
-        v = np.clip(0.5 * r - 0.419 * g - 0.081 * b + 128.0, 0.0, 255.0).astype(np.uint8)
-        u_ds = u.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3)).astype(np.uint8)
-        v_ds = v.reshape(h // 2, 2, w // 2, 2).mean(axis=(1, 3)).astype(np.uint8)
-        uv = np.empty((h // 2, w), dtype=np.uint8)
-        uv[:, 0::2] = u_ds
-        uv[:, 1::2] = v_ds
 
-    y_batch = y[np.newaxis, ..., np.newaxis]
-    uv_batch = uv[np.newaxis, ..., np.newaxis]
-    return y_batch, uv_batch
+def mlvc_ycbcr_to_rgb(ycbcr: np.ndarray) -> np.ndarray:
+    """Convert HWC MLVC BT.709 full-range YCbCr [0,255] to RGB."""
+    values = ycbcr.astype(np.float32)
+    y, cb, cr = values[..., 0], values[..., 1], values[..., 2]
+    r = y + (2.0 - 2.0 * 0.2126) * (cr - 127.5)
+    b = y + (2.0 - 2.0 * 0.0722) * (cb - 127.5)
+    g = (y - 0.2126 * r - 0.0722 * b) / 0.7152
+    return np.stack((r, g, b), axis=-1).clip(0.0, 255.0)
 
 
 def infer_rknn_rgb(
     runtime: _RknnRuntime,
     lr_rgb: np.ndarray,
-    *,
-    input_nv12: bool = False,
 ) -> np.ndarray:
-    """Run RKNN simulator / runtime on one LR RGB uint8 image."""
-    if input_nv12:
-        y_batch, uv_batch = rgb_to_nv12_planes(lr_rgb)
-        outputs = runtime.inference(
-            inputs=[y_batch, uv_batch],
-            data_format=["nhwc", "nhwc"],
-        )
-    else:
-        batch = np.expand_dims(lr_rgb.astype(np.uint8), axis=0)
-        outputs = runtime.inference(inputs=[batch], data_format="nhwc")
-    return _rknn_output_to_hwc(outputs[0])
+    """Run a YCbCr444 RKNN model and return its output in RGB."""
+    ycbcr = np.rint(rgb_to_mlvc_ycbcr(lr_rgb)).astype(np.uint8)
+    outputs = runtime.inference(inputs=[ycbcr[np.newaxis]], data_format="nhwc")
+    return mlvc_ycbcr_to_rgb(_rknn_output_to_hwc(outputs[0]))
 
 
 def _normalize_state_dict(state_dict: dict) -> dict:
@@ -270,10 +251,13 @@ def load_fp32_predictor(
     model.eval()
 
     def predict(lr_rgb: np.ndarray) -> np.ndarray:
+        from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444, yuv444_to_rgb
+
         lr = torch.from_numpy(lr_rgb).permute(2, 0, 1).unsqueeze(0).to(dev).float()
+        lr = rgb_to_yuv444(lr)
         with torch.no_grad():
             sr = torch.clamp(model(lr), 0.0, 255.0)
-        return sr.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        return yuv444_to_rgb(sr).squeeze(0).permute(1, 2, 0).cpu().numpy()
 
     return predict
 
@@ -284,7 +268,6 @@ def evaluate_accuracy(
     *,
     fp32_predictor,
     quant_mode: str,
-    input_nv12: bool = False,
 ) -> AccuracyReport:
     if not pairs:
         raise ValueError("No validation images found for RKNN accuracy eval.")
@@ -297,7 +280,7 @@ def evaluate_accuracy(
     match_psnrs: list[float] = []
 
     for pair in pairs:
-        sr_rknn = infer_rknn_rgb(runtime, pair.lr_rgb, input_nv12=input_nv12)
+        sr_rknn = infer_rknn_rgb(runtime, pair.lr_rgb)
         rknn_psnrs.append(psnr_numpy(sr_rknn, pair.hr_rgb))
         rknn_ssims.append(ssim_numpy(sr_rknn, pair.hr_rgb))
 
@@ -447,7 +430,6 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         pairs,
         fp32_predictor=fp32_predictor,
         quant_mode=quant_mode,
-        input_nv12=getattr(args, "input_nv12", False),
     )
     print()
     print(format_accuracy_table(report))

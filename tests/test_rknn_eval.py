@@ -5,13 +5,13 @@ import numpy as np
 from rk3588_mobile_sr.deploy.rknn_eval import (
     AccuracyReport,
     AccuracyRow,
-    ImagePair,
     _rknn_output_to_hwc,
     collect_image_pairs,
     format_accuracy_table,
     infer_rknn_rgb,
+    mlvc_ycbcr_to_rgb,
     psnr_numpy,
-    rgb_to_nv12_planes,
+    rgb_to_mlvc_ycbcr,
     ssim_numpy,
 )
 
@@ -20,8 +20,8 @@ class _FakeRuntime:
     def inference(self, inputs, data_format=None):
         lr = inputs[0][0].astype(np.float32)
         h, w, _ = lr.shape
-        out = np.zeros((3, h * 3, w * 3), dtype=np.float32)
-        out[0, :h, :w] = lr[..., 0]
+        out = np.repeat(np.repeat(lr, 3, axis=0), 3, axis=1)
+        out = np.transpose(out, (2, 0, 1))
         return [out[None, ...]]
 
 
@@ -68,11 +68,12 @@ def test_rknn_output_to_hwc_accepts_nhwc():
     assert out.shape == (1080, 1920, 3)
 
 
-def test_rgb_to_nv12_planes_shape():
-    rgb = np.zeros((360, 640, 3), dtype=np.uint8)
-    y, uv = rgb_to_nv12_planes(rgb)
-    assert y.shape == (1, 360, 640, 1)
-    assert uv.shape == (1, 180, 640, 1)
+def test_mlvc_bt709_numpy_roundtrip():
+    rgb = np.random.default_rng(0).uniform(0, 255, (16, 24, 3)).astype(np.float32)
+    ycbcr = rgb_to_mlvc_ycbcr(rgb)
+    restored = mlvc_ycbcr_to_rgb(ycbcr)
+    assert ycbcr.shape == rgb.shape
+    assert np.allclose(restored, rgb, atol=1e-3)
 
 
 def test_collect_image_pairs_resizes(tmp_path):

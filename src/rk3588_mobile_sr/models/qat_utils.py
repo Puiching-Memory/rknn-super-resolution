@@ -82,9 +82,13 @@ def bn_recalibrate(model: nn.Module, loader: Any, device: torch.device, batches:
     """Forward-only mini-batch recalibration of BN running statistics."""
     model.train()
     with torch.no_grad():
-        for idx, (lr, _) in enumerate(loader):
+        for idx, batch in enumerate(loader):
             if idx >= batches:
                 break
+            wait_ready = getattr(batch, "wait_ready", None)
+            if wait_ready is not None:
+                wait_ready()
+            lr, _ = batch
             lr = lr.to(device)
             _ = model(lr)
 

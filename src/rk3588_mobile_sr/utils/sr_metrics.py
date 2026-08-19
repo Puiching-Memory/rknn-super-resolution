@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -11,11 +12,6 @@ import torch.nn as nn
 from skimage.metrics import structural_similarity as ssim_metric
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-
-from rk3588_mobile_sr.data.val_loader import FixedValDataset, iter_val_batches, select_val_vis_indices, val_spec_slug
-
-# UVG canvas samples (diverse sequences) tracked each validation step.
-DEFAULT_FIXED_VAL_TRACKS: int = 3
 
 
 @dataclass
@@ -32,8 +28,6 @@ class ValidationMetrics:
     psnr_p90: float
     dists: float | None = None
     vmaf: float | None = None
-    fixed_psnr: dict[str, float] = field(default_factory=dict)
-    fixed_vmaf: dict[str, float] = field(default_factory=dict)
 
     def to_log_dict(self) -> dict[str, float]:
         metrics: dict[str, float] = {
@@ -50,11 +44,14 @@ class ValidationMetrics:
             metrics["val/dists"] = self.dists
         if self.vmaf is not None:
             metrics["val/vmaf"] = self.vmaf
-        for slug, psnr in self.fixed_psnr.items():
-            metrics[f"val/fixed_{slug}_psnr"] = psnr
-        for slug, score in self.fixed_vmaf.items():
-            metrics[f"val/fixed_{slug}_vmaf"] = score
         return metrics
+
+
+def iter_val_batches(
+    val_loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
+) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    """Yield already-processed MLVC validation batches."""
+    yield from val_loader
 
 
 def shave_borders(tensor: torch.Tensor, shave: int) -> torch.Tensor:
@@ -124,7 +121,7 @@ def ssim_rgb(
     )
 
 
-def _rank_sample_indices(val_loader: DataLoader) -> list[int]:
+def _rank_sample_indices(val_loader: DataLoader | object) -> list[int]:
     sampler = val_loader.sampler
     if isinstance(sampler, DistributedSampler):
         return list(sampler)
@@ -134,35 +131,19 @@ def _rank_sample_indices(val_loader: DataLoader) -> list[int]:
 def _aggregate_per_sample(
     records: list[tuple[int, float, float, float, float, float, float]],
     *,
-    fixed_indices: tuple[int, ...],
-    specs: list | None,
     has_dists: bool,
     has_vmaf: bool,
 ) -> ValidationMetrics:
     if not records:
         return ValidationMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
-    records.sort(key=lambda row: row[0])
+    records = sorted({row[0]: row for row in records}.values(), key=lambda row: row[0])
     psnrs = np.array([row[1] for row in records], dtype=np.float64)
     y_psnrs = np.array([row[2] for row in records], dtype=np.float64)
     ssims = np.array([row[3] for row in records], dtype=np.float64)
     l1s = np.array([row[4] for row in records], dtype=np.float64)
     dists_vals = np.array([row[5] for row in records], dtype=np.float64) if has_dists else None
     vmaf_vals = np.array([row[6] for row in records], dtype=np.float64) if has_vmaf else None
-
-    by_index_psnr = {row[0]: row[1] for row in records}
-    by_index_vmaf = {row[0]: row[6] for row in records} if has_vmaf else {}
-    fixed_psnr: dict[str, float] = {}
-    fixed_vmaf: dict[str, float] = {}
-    for idx in fixed_indices:
-        if specs is not None and 0 <= idx < len(specs):
-            slug = val_spec_slug(specs[idx])
-        else:
-            slug = str(idx)
-        if idx in by_index_psnr:
-            fixed_psnr[slug] = by_index_psnr[idx]
-        if idx in by_index_vmaf:
-            fixed_vmaf[slug] = by_index_vmaf[idx]
 
     return ValidationMetrics(
         psnr=float(psnrs.mean()),
@@ -175,8 +156,6 @@ def _aggregate_per_sample(
         psnr_p90=float(np.percentile(psnrs, 90)),
         dists=float(dists_vals.mean()) if dists_vals is not None else None,
         vmaf=float(vmaf_vals.mean()) if vmaf_vals is not None else None,
-        fixed_psnr=fixed_psnr,
-        fixed_vmaf=fixed_vmaf,
     )
 
 
@@ -191,13 +170,11 @@ def _broadcast_scalar(value: float, rank: int, world_size: int, device: torch.de
 @torch.no_grad()
 def validate_ddp_extended(
     model: nn.Module,
-    val_loader: DataLoader,
+    val_loader: DataLoader | object,
     rank: int,
     world_size: int,
     *,
     scale: int = 3,
-    fixed_indices: tuple[int, ...] | None = None,
-    fixed_tracks: int = DEFAULT_FIXED_VAL_TRACKS,
     compute_dists: bool = False,
     compute_vmaf: bool = True,
     vmaf_model: str = "1080p",
@@ -207,13 +184,6 @@ def validate_ddp_extended(
     """Run full validation; primary score is VMAF when enabled, else PSNR."""
     from rk3588_mobile_sr.utils.pyiqa_metric import batch_perceptual_metric
     from rk3588_mobile_sr.utils.vmaf_metric import batch_vmaf
-
-    dataset = val_loader.dataset
-    specs = dataset.specs if isinstance(dataset, FixedValDataset) else None
-    if fixed_indices is None and specs is not None:
-        fixed_indices = tuple(select_val_vis_indices(specs, fixed_tracks))
-    elif fixed_indices is None:
-        fixed_indices = ()
 
     if colorspace == "yuv":
         from rk3588_mobile_sr.data.yuv_utils import yuv444_to_rgb
@@ -325,8 +295,6 @@ def validate_ddp_extended(
                 merged.extend(part)
         metrics = _aggregate_per_sample(
             merged,
-            fixed_indices=fixed_indices,
-            specs=specs,
             has_dists=compute_dists,
             has_vmaf=compute_vmaf,
         )
@@ -343,7 +311,7 @@ def validate_ddp_extended(
 @torch.no_grad()
 def validate_ddp(
     model: nn.Module,
-    val_loader: DataLoader,
+    val_loader: DataLoader | object,
     rank: int,
     world_size: int,
     *,
@@ -356,6 +324,5 @@ def validate_ddp(
         rank,
         world_size,
         scale=scale,
-        fixed_indices=(),
     )
     return score

@@ -5,6 +5,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
+from contextlib import suppress
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -52,9 +53,7 @@ class BatchPrefetcher(Iterator[T]):
             except queue.Empty:
                 break
         # Unblock a worker stuck on put() so it can observe _stop / exit.
-        try:
+        with suppress(queue.Full):
             self._queue.put_nowait(None)
-        except queue.Full:
-            pass
         if self._thread.is_alive():
             self._thread.join(timeout=30.0)

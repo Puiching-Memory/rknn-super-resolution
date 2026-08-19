@@ -168,8 +168,12 @@ class StepTrainer:
         pending_batch: tuple[torch.Tensor, torch.Tensor] | None = None
 
         def _fetch_batch() -> tuple[torch.Tensor, torch.Tensor]:
-            lr, hr = next(prefetcher)
+            batch = next(prefetcher)
             with torch.cuda.stream(prefetch_stream):
+                wait_ready = getattr(batch, "wait_ready", None)
+                if wait_ready is not None:
+                    wait_ready(prefetch_stream)
+                lr, hr = batch
                 lr, hr = _to_device(lr, hr, self.ctx.device)
             return lr, hr
 

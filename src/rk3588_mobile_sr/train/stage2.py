@@ -81,6 +81,8 @@ def main():
         base_model = build_model(args, ctx.device, weight_path=args.stage1_weight)
         recal_bundle = session.build_loaders(train_aug=False)
         bn_recalibrate(base_model, recal_bundle.train, ctx.device, batches=args.bn_batches)
+        recal_bundle.train.close()
+        del recal_bundle
         ctx.barrier()
 
         example_inputs = (torch.randn(1, 3, args.patch_size, args.patch_size).to(ctx.device),)

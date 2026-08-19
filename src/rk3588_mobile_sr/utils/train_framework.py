@@ -15,12 +15,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.config import load_config
-from rk3588_mobile_sr.data.train_loader import (
-    CodecTrainLoader,
-    build_codec_train_loader,
-    data_settings_from_args,
-)
-from rk3588_mobile_sr.data.val_loader import build_val_loader
+from rk3588_mobile_sr.data.mlvc_loader import MLVCTrainLoader, build_mlvc_loaders
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
 from rk3588_mobile_sr.utils.traceml_profiling import add_traceml_args
 
@@ -47,25 +42,15 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=None,
         help="YAML config path (default: bundled mobileone_sr_x3.yaml)",
     )
+    parser.add_argument("--dataset_description", type=str, default=None)
+    parser.add_argument("--mlvc_repo", type=str, default=None)
+    parser.add_argument("--mlvc_checkpoint", type=str, default=None)
     parser.add_argument(
-        "--codec_manifest",
-        type=str,
-        default=None,
-        help="offline codec clip manifest JSONL (default: data.codec_manifest from YAML)",
+        "--mlvc_variant", type=str, choices=["small", "full"], default=None
     )
-    parser.add_argument(
-        "--val_manifest",
-        type=str,
-        default=None,
-        help="fixed validation manifest JSONL",
-    )
-    parser.add_argument(
-        "--decode",
-        type=str,
-        default=None,
-        choices=["auto", "raw"],
-        help="frame read backend: auto or raw (offline LR .npy + source YUV)",
-    )
+    parser.add_argument("--sequence_frames", type=int, default=None)
+    parser.add_argument("--q_indices", nargs="+", type=int, default=None)
+    parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--scale", type=int, default=3)
     parser.add_argument("--num_channels", type=int, default=32)
     parser.add_argument("--num_blocks", type=int, default=8)
@@ -76,15 +61,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         default=None,
         choices=["rgb", "yuv"],
-        help="train/val tensor layout: rgb or yuv444 (BT.601, [0,255])",
-    )
-    parser.add_argument(
-        "--no_nv12_simulate",
-        action="store_true",
-        help="disable NV12 4:2:0 chroma subsample simulation before YUV conversion",
+        help="MobileOne tensor layout: RGB or MLVC BT.709 YCbCr444 in [0,255]",
     )
     parser.add_argument("--patch_size", type=int, default=128)
-    parser.add_argument("--batch_size", type=int, default=16, help="per-GPU batch size")
+    parser.add_argument("--batch_size", type=int, default=2, help="per-GPU sequence batch size")
     parser.add_argument("--epochs", type=int, default=600)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
@@ -122,12 +102,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--vis_samples",
         type=int,
         default=8,
-        help="number of validation / data-preview panels (diverse codec×bitrate)",
+        help="number of validation / data-preview panels across MLVC q-indices",
     )
     parser.add_argument(
         "--no_data_preview",
         action="store_true",
-        help="skip pre-training codec downsample / colorspace preview",
+        help="skip pre-training MLVC reconstruction preview",
     )
     parser.add_argument(
         "--no_vis",
@@ -329,39 +309,39 @@ def build_loaders(
     distributed: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
-) -> tuple[CodecTrainLoader, None, DataLoader | None]:
-    """Build canvas codec train/validation loaders."""
-    del device
+) -> tuple[MLVCTrainLoader, None, DataLoader | object]:
+    """Build OpenVidHD loaders with a shared frozen MLVC runtime."""
     if distributed and dist.is_initialized():
         rank = dist.get_rank() if rank is None else rank
     else:
         rank = 0 if rank is None else rank
 
     world_size = dist.get_world_size() if distributed and dist.is_initialized() else 1
-    settings = replace(data_settings_from_args(args), augment=train_aug)
-
-    train_bundle = build_codec_train_loader(
-        settings,
+    app_cfg = load_config(getattr(args, "config", None))
+    data = app_cfg.data
+    overrides = {
+        "dataset_description": getattr(args, "dataset_description", None),
+        "mlvc_repo": getattr(args, "mlvc_repo", None),
+        "mlvc_checkpoint": getattr(args, "mlvc_checkpoint", None),
+        "mlvc_variant": getattr(args, "mlvc_variant", None),
+        "sequence_frames": getattr(args, "sequence_frames", None),
+        "q_indices": tuple(args.q_indices) if getattr(args, "q_indices", None) else None,
+        "num_workers": getattr(args, "num_workers", None),
+    }
+    data = replace(data, **{name: value for name, value in overrides.items() if value is not None})
+    train_bundle, val_loader = build_mlvc_loaders(
+        data,
+        device=device,
         batch_size=args.batch_size,
+        patch_size=getattr(args, "patch_size", None),
+        scale=getattr(args, "scale", 3),
+        colorspace=getattr(args, "colorspace", None) or data.colorspace,
+        train_aug=train_aug and data.augment,
+        val_batch_size=val_bs,
         rank=rank,
         world_size=world_size,
-        seed=42,
-        device_id=rank if distributed else 0,
+        project_root=Path(__file__).resolve().parents[3],
     )
-
-    val_loader = None
-    app_cfg = load_config(getattr(args, "config", None))
-    val_manifest = getattr(args, "val_manifest", None) or app_cfg.data.val_manifest
-    if val_manifest:
-        val_loader, _ = build_val_loader(
-            settings,
-            val_manifest=val_manifest,
-            batch_size=val_bs,
-            num_workers=2,
-            distributed=distributed,
-            rank=rank,
-        )
-
     return train_bundle, None, val_loader
 
 

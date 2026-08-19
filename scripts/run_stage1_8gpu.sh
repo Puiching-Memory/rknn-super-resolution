@@ -25,10 +25,10 @@ echo "[$(date -Is)] starting stage1 ${NPROC}gpu experiment=$EXP_NAME" | tee -a "
 
 exec >>"$CONSOLE_LOG" 2>&1
 run_torchrun "$NPROC" -m rk3588_mobile_sr.train.stage1 \
-  --codec_manifest data/codec_cache/manifest.jsonl \
-  --val_manifest data/sources/manifests/val_fixed.jsonl \
-  --decode auto \
-  --batch_size 16 \
+  --dataset_description data/OpenVidHD/openvidhd_60k_train64/description.json \
+  --mlvc_repo third_party/mlvc \
+  --mlvc_checkpoint data/mlvc/mlvc-s-psnr-v1.ckpt \
+  --batch_size 2 \
   --patch_size 128 \
   --max_steps 100000 \
   --val_every 1000 \

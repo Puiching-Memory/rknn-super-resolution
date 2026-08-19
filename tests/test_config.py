@@ -10,8 +10,9 @@ def test_load_default_config():
     assert cfg.model.num_channels == 32
     assert cfg.model.negative_slope == 0.1
     assert cfg.data.colorspace == "yuv"
-    assert cfg.data.codec_manifest.endswith("manifest.jsonl")
-    assert cfg.data.decode == "auto"
+    assert cfg.data.dataset_description.endswith("description.json")
+    assert cfg.data.mlvc_variant == "small"
+    assert cfg.data.q_indices == (0, 21, 42, 63)
     assert cfg.data.lr_size == (360, 640)
     assert cfg.stage1.patch_size == 128
     assert cfg.deploy.input_h == 360
@@ -23,5 +24,5 @@ def test_load_config_from_path():
     path = default_config_path()
     assert path.exists()
     cfg = load_config(path)
-    assert cfg.data.decode_num_workers == 4
-    assert cfg.data.prefetch_batches == 4
+    assert cfg.data.num_workers == 4
+    assert cfg.data.prefetch_batches == 1

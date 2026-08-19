@@ -9,6 +9,7 @@ import torch.nn as nn
 from torchvision.io import read_image
 from torchvision.transforms.functional import convert_image_dtype, resize
 
+from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
 from rk3588_mobile_sr.models.qat_utils import bn_recalibrate
 
@@ -37,13 +38,13 @@ def _load_calib_batch(
     input_w: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Load one LR RGB image as NCHW float tensor in [0, 255]."""
+    """Load one LR image as MLVC BT.709 YCbCr444 in [0, 255]."""
     img = read_image(str(path))
     if img.shape[0] == 1:
         img = img.repeat(3, 1, 1)
     img = convert_image_dtype(img, torch.float32) * 255.0
     img = resize(img, [input_h, input_w], antialias=True)
-    return img.unsqueeze(0).to(device)
+    return rgb_to_yuv444(img.unsqueeze(0)).to(device)
 
 
 def recalibrate_bn_from_calib_list(

@@ -11,22 +11,18 @@ import torch
 import torch.nn as nn
 
 from rk3588_mobile_sr.config import default_config_path
-from rk3588_mobile_sr.data.types import SourceRecord, ValSampleMeta, ValSampleSpec
-from rk3588_mobile_sr.data.val_loader import select_val_vis_indices, val_spec_slug
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
 from rk3588_mobile_sr.utils.swanlab_logging import (
-    ValVisSample,
     _looks_like_local_run_suffix,
     collect_sr_validation_panels,
     find_swanlab_run_id,
     load_swanlab_run_record,
-    lookup_swanlab_cloud_run_id,
-    make_codec_canvas_panel,
     make_data_preview_panel,
+    make_sr_panel,
     resolve_swanlab_run_id,
     rgb_diff_stats,
+    save_sr_panels,
     save_swanlab_run_record,
-    save_val_vis_samples,
 )
 from rk3588_mobile_sr.utils.train_framework import resolve_colorspace
 
@@ -36,57 +32,17 @@ class _Identity(nn.Module):
         return x
 
 
-def _spec(seq: str, codec: str, bitrate: int) -> ValSampleSpec:
-    return ValSampleSpec(
-        source=SourceRecord(
-            id=f"uvg/{seq}@{codec}@{bitrate}k",
-            type="yuv_video",
-            path=f"data/{seq}.yuv",
-            width=1920,
-            height=1080,
-            fps=50,
-            frames=600,
-        ),
-        frame_index=72,
-        clip_start=60,
-        codec=codec,
-        bitrate_kbps=bitrate,
-    )
-
-
 def test_resolve_colorspace_from_yaml():
     args = argparse.Namespace(colorspace=None, config=str(default_config_path()))
     assert resolve_colorspace(args) == "yuv"
 
 
-def test_select_val_vis_indices_covers_seq_codec_bitrate():
-    specs = [
-        _spec("Beauty", "libx264", 150),
-        _spec("Beauty", "libx264", 800),
-        _spec("Bosphorus", "libx265", 300),
-        _spec("CityAlley", "libsvtav1", 500),
-        _spec("Jockey", "libx264", 200),
-    ]
-    indices = select_val_vis_indices(specs, 4)
-    assert len(indices) == 4
-    sequences = {specs[i].source.id.split("@")[0].split("/")[-1] for i in indices}
-    codecs = {specs[i].codec for i in indices}
-    bitrates = {specs[i].bitrate_kbps for i in indices}
-    assert sequences == {"Beauty", "Bosphorus", "CityAlley", "Jockey"}
-    assert codecs == {"libx264", "libx265", "libsvtav1"}
-    assert bitrates == {150, 200, 300, 500}
-
-
-def test_val_spec_slug():
-    assert val_spec_slug(_spec("FlowerFocus", "libx264", 800)) == "FlowerFocus_libx264_800k"
-
-
-def test_make_codec_canvas_panel_uses_nearest_lr_upscale():
+def test_make_sr_panel_uses_nearest_lr_upscale():
     lr = torch.zeros(3, 12, 12)
     lr[:, 0::3, 0::3] = 255.0
     sr = torch.zeros(3, 36, 36)
     hr = torch.zeros(3, 36, 36)
-    panel = make_codec_canvas_panel(lr, sr, hr, include_detail=False)
+    panel = make_sr_panel(lr, sr, hr, include_detail=False)
     assert panel.shape == (36, 36 * 3, 3)
     assert panel[:, :36, 0].max() == 255
 
@@ -127,21 +83,10 @@ def test_collect_sr_validation_panels_converts_yuv_to_rgb():
     assert hr_col[..., 0].mean() > hr_col[..., 1].mean()
 
 
-def test_save_val_vis_samples_writes_png(tmp_path: Path):
-    sample = ValVisSample(
-        meta=ValSampleMeta(
-            slug="Beauty_libx264_150k",
-            sequence="Beauty",
-            codec="libx264",
-            bitrate_kbps=150,
-            frame_index=0,
-            lr_size=(12, 12),
-            hr_size=(36, 36),
-        ),
-        panel=np.zeros((36, 108, 3), dtype=np.uint8),
-    )
-    out = save_val_vis_samples([sample], tmp_path)
-    path = out / "Beauty_libx264_150k.png"
+def test_save_sr_panels_writes_png(tmp_path: Path):
+    panel = np.zeros((36, 108, 3), dtype=np.uint8)
+    out = save_sr_panels([panel], tmp_path)
+    path = out / "sample_000.png"
     assert path.is_file()
     assert path.stat().st_size > 0
 
@@ -201,13 +146,5 @@ def test_resolve_swanlab_run_id_uses_cloud_lookup_for_local_suffix(tmp_path: Pat
         project="rk3588-mobile-sr",
         experiment_name="stage1-8gpu-20260703-1608",
         resume_checkpoint="dummy.pth",
-    )
-    assert run_id == "gjid8vrb1jigurxquwabt"
-
-
-def test_lookup_swanlab_cloud_run_id_live():
-    run_id = lookup_swanlab_cloud_run_id(
-        "rk3588-mobile-sr",
-        "stage1-8gpu-20260703-1608",
     )
     assert run_id == "gjid8vrb1jigurxquwabt"
