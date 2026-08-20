@@ -6,8 +6,8 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import torch
-from PIL import Image
 
 from rk3588_mobile_sr.config import load_config
 from rk3588_mobile_sr.data.mlvc_loader import build_mlvc_loaders
@@ -35,7 +35,9 @@ def main() -> None:
         raise RuntimeError("MLVC calibration generation requires CUDA")
 
     project_root = Path(__file__).resolve().parents[3]
-    data = load_config(args.config).data
+    app_cfg = load_config(args.config)
+    data = app_cfg.data
+    model_cfg = app_cfg.model
     overrides = {
         "dataset_description": args.dataset_description,
         "mlvc_repo": args.mlvc_repo,
@@ -68,16 +70,12 @@ def main() -> None:
     try:
         for lr_ycbcr, _hr in val_loader:
             for sample in lr_ycbcr:
-                array = (
-                    sample.clamp(0.0, 255.0)
-                    .round()
-                    .byte()
-                    .permute(1, 2, 0)
-                    .cpu()
-                    .numpy()
-                )
-                path = output_dir / f"mlvc_{len(paths):04d}.png"
-                Image.fromarray(array).save(path)
+                sample = sample.clamp(0.0, 255.0).round().byte()
+                packed = torch.nn.functional.pixel_unshuffle(
+                    sample.unsqueeze(0), model_cfg.phase_factor
+                ).cpu().numpy()
+                path = output_dir / f"mlvc_{len(paths):04d}.npy"
+                np.save(path, packed)
                 paths.append(path)
                 if len(paths) >= args.samples:
                     break

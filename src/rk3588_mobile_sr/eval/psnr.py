@@ -9,35 +9,46 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
-from rk3588_mobile_sr.utils.train_framework import require_cuda, setup_device
+from rk3588_mobile_sr.config import load_config
+from rk3588_mobile_sr.models import MobileOneSR
+from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict
 
 
 def parse_args():
+    cfg = load_config().model
     parser = argparse.ArgumentParser()
     parser.add_argument("--weight", type=str, required=True)
     parser.add_argument("--hr_dir", type=str, required=True)
     parser.add_argument("--lr_dir", type=str, default=None)
-    parser.add_argument("--scale", type=int, default=3)
-    parser.add_argument("--num_channels", type=int, default=32)
-    parser.add_argument("--num_blocks", type=int, default=8)
-    parser.add_argument("--num_conv_branches", type=int, default=4)
-    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--scale", type=int, default=cfg.scale)
+    parser.add_argument("--num_channels", type=int, default=cfg.num_channels)
+    parser.add_argument("--num_blocks", type=int, default=cfg.num_blocks)
+    parser.add_argument("--phase_factor", type=int, default=cfg.phase_factor)
+    parser.add_argument(
+        "--output_kernel_size", type=int, choices=[1, 3], default=cfg.output_kernel_size
+    )
+    parser.add_argument("--num_conv_branches", type=int, default=cfg.num_conv_branches)
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--save_dir", type=str, default=None)
     return parser.parse_args()
 
 
 @torch.no_grad()
 def evaluate(args):
-    require_cuda()
-    device = setup_device(args)
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested but CUDA is unavailable")
+    device = torch.device(args.device)
     model = MobileOneSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
+        phase_factor=args.phase_factor,
+        output_kernel_size=args.output_kernel_size,
         num_conv_branches=args.num_conv_branches,
     ).to(device)
-    model.load_state_dict(torch.load(args.weight, map_location=device))
+    raw = torch.load(args.weight, map_location=device, weights_only=False)
+    state_dict = raw["state_dict"] if isinstance(raw, dict) and "state_dict" in raw else raw
+    model.load_state_dict(_normalize_state_dict(state_dict))
     model.switch_to_deploy()
     model.eval()
 

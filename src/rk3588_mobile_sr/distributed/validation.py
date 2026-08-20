@@ -35,6 +35,7 @@ class ValidationConfig:
     vis_max_size: int = 768
     colorspace: str = "rgb"
     data_preview: bool = True
+    final_preview: bool = True
 
 
 @dataclass
@@ -42,8 +43,10 @@ class EarlyStopState:
     enabled: bool = False
     patience: int = 8
     min_delta: float = 0.1
+    min_evaluations: int = 0
     best_score: float = -1.0
     patience_counter: int = 0
+    evaluations: int = 0
 
     # Backward-compatible alias used by older tests / logs.
     @property
@@ -56,6 +59,7 @@ class EarlyStopState:
 
     def update(self, score: float) -> tuple[bool, bool]:
         """Return (improved, should_stop). Higher score is better (VMAF / PSNR)."""
+        self.evaluations += 1
         if not self.enabled:
             improved = score > self.best_score
             if improved:
@@ -68,7 +72,10 @@ class EarlyStopState:
             self.patience_counter = 0
         else:
             self.patience_counter += 1
-        should_stop = self.patience_counter >= self.patience
+        should_stop = (
+            self.evaluations >= self.min_evaluations
+            and self.patience_counter >= self.patience
+        )
         return improved, should_stop
 
 

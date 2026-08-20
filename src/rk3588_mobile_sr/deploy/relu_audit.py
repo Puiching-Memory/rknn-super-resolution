@@ -15,6 +15,7 @@ import torch.nn as nn
 from torchvision.io import read_image
 from torchvision.transforms.functional import resize
 
+from rk3588_mobile_sr.config import load_config
 from rk3588_mobile_sr.deploy.rknn_eval import psnr_numpy
 from rk3588_mobile_sr.models.mobileone_block import MobileOneBlock
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
@@ -110,7 +111,7 @@ def load_checkpoint_model(
     *,
     scale: int = 3,
     num_channels: int = 32,
-    num_blocks: int = 8,
+    num_blocks: int = 6,
     num_conv_branches: int = 4,
     deploy: bool = False,
     identity_var_floor: float = 0.0,
@@ -888,20 +889,21 @@ def format_report(report: AuditReport) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    cfg = load_config()
     parser = argparse.ArgumentParser(
         description="Audit ReLU sparsity and output impact on real DIV2K validation images.",
     )
-    parser.add_argument("--weight", type=str, default="checkpoints/stage1/best.pth")
+    parser.add_argument("--weight", type=str, default="checkpoints/train/float/best.pth")
     parser.add_argument("--hr_dir", type=str, default="data/DIV2K_valid_HR")
     parser.add_argument("--lr_dir", type=str, default="data/DIV2K_valid_LR_bicubic/X3")
-    parser.add_argument("--scale", type=int, default=3)
-    parser.add_argument("--input_h", type=int, default=360)
-    parser.add_argument("--input_w", type=int, default=640)
+    parser.add_argument("--scale", type=int, default=cfg.model.scale)
+    parser.add_argument("--input_h", type=int, default=cfg.deploy.input_h)
+    parser.add_argument("--input_w", type=int, default=cfg.deploy.input_w)
     parser.add_argument("--max_images", type=int, default=100)
     parser.add_argument("--identity_var_floor", type=float, default=0.0)
-    parser.add_argument("--num_channels", type=int, default=32)
-    parser.add_argument("--num_blocks", type=int, default=8)
-    parser.add_argument("--num_conv_branches", type=int, default=4)
+    parser.add_argument("--num_channels", type=int, default=cfg.model.num_channels)
+    parser.add_argument("--num_blocks", type=int, default=cfg.model.num_blocks)
+    parser.add_argument("--num_conv_branches", type=int, default=cfg.model.num_conv_branches)
     parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
     parser.add_argument("--neg_threshold", type=float, default=0.90)
     parser.add_argument("--output", type=str, default="artifacts/relu_audit.json")

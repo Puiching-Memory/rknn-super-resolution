@@ -84,3 +84,34 @@ def test_mobileone_sr_switch_to_deploy():
         deploy_out = model(x)
 
     assert deploy_out.shape == train_out.shape
+
+
+def test_mobileone_sr_core_contract():
+    model = MobileOneSR(num_channels=8, num_blocks=2, scale=3, phase_factor=2)
+    model.eval()
+    lr = torch.randn(1, 3, 16, 20)
+
+    with torch.no_grad():
+        packed = torch.nn.functional.pixel_unshuffle(lr, 2)
+        core = model.forward_core(packed)
+        full = model(lr)
+        reconstructed = torch.nn.functional.pixel_shuffle(core, 6)
+
+    assert packed.shape == (1, 12, 8, 10)
+    assert core.shape == (1, 108, 8, 10)
+    assert full.shape == (1, 3, 48, 60)
+    assert torch.equal(full, reconstructed)
+
+
+def test_mobileone_sr_phase_switch_to_deploy_matches():
+    model = MobileOneSR(num_channels=8, num_blocks=2)
+    model.eval()
+    lr = torch.randn(1, 3, 12, 16)
+    with torch.no_grad():
+        before = model(lr)
+
+    model.switch_to_deploy()
+    with torch.no_grad():
+        after = model(lr)
+
+    assert torch.allclose(before, after, atol=1e-4, rtol=1e-5)

@@ -31,13 +31,14 @@ def import_rknn():
 
 
 def parse_args():
-    deploy = load_config().deploy
+    cfg = load_config()
+    deploy = cfg.deploy
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx", type=str, required=True)
     parser.add_argument("--output", type=str, default=deploy.rknn_output)
-    parser.add_argument("--target", type=str, default="rk3588")
+    parser.add_argument("--target", type=str, default=deploy.target)
     parser.add_argument("--calib_dir", type=str, default=deploy.calib_dir)
-    parser.add_argument("--input_size", type=str, default="3,360,640")
+    parser.add_argument("--input_size", type=str, default=_default_input_size(cfg))
     parser.add_argument(
         "--quantize",
         type=str,
@@ -111,7 +112,7 @@ def parse_args():
         default=None,
         help="Encrypted model path; default: {output_stem}.crypt.rknn (RKNN toolkit convention).",
     )
-    add_eval_args(parser)
+    add_eval_args(parser, cfg.model)
     return parser.parse_args()
 
 
@@ -158,9 +159,10 @@ def _resolve_calib_dir(path: str) -> str:
 
 
 def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
+    channels, _, _ = _parse_input_size(args.input_size)
     kwargs = {
-        "mean_values": [[0, 0, 0]],
-        "std_values": [[1, 1, 1]],
+        "mean_values": [[0] * channels],
+        "std_values": [[1] * channels],
         "target_platform": args.target,
         "quantized_algorithm": args.quantize,
     }
@@ -277,6 +279,16 @@ def _parse_input_size(spec: str) -> list[int]:
     if len(parts) != 3:
         raise ValueError(f"input_size must be C,H,W, got {spec!r}")
     return parts
+
+
+def _default_input_size(cfg) -> str:
+    model = cfg.model
+    deploy = cfg.deploy
+    factor = model.phase_factor
+    if deploy.input_h % factor or deploy.input_w % factor:
+        raise ValueError("deploy input size must be divisible by model.phase_factor")
+    channels = model.in_channels * factor * factor
+    return f"{channels},{deploy.input_h // factor},{deploy.input_w // factor}"
 
 
 def main():

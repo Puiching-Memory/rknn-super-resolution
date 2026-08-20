@@ -98,8 +98,12 @@ class StepTrainer:
         if not self.ctx.is_main:
             return
         plan = (
-            "plan: max_steps={} val_every={} save_every={} log_every={}"
-            + (" early_stop_patience={} min_delta={}" if self.early_stop.enabled else "")
+            "plan: safety_max_steps={} val_every={} save_every={} log_every={}"
+            + (
+                " early_stop_patience={} min_delta={} min_evaluations={}"
+                if self.early_stop.enabled
+                else ""
+            )
         )
         if self.early_stop.enabled:
             logger.info(
@@ -110,6 +114,7 @@ class StepTrainer:
                 self.config.log_every,
                 self.early_stop.patience,
                 self.early_stop.min_delta,
+                self.early_stop.min_evaluations,
             )
         else:
             logger.info(
@@ -222,6 +227,8 @@ class StepTrainer:
 
                 if self.val_loader is not None and self.global_step % self.config.val_every == 0:
                     val_result = val_runner.run(self.global_step)
+                    if val_result is not None and self.hooks.on_validation is not None:
+                        self.hooks.on_validation(val_result)
                     if val_result is not None and val_result.should_stop:
                         break
 
@@ -252,6 +259,7 @@ class StepTrainer:
             and self.val_loader is not None
             and self.save_dir is not None
             and self.validation_config.log_images
+            and self.validation_config.final_preview
         ):
             try:
                 best_path = self.save_dir / "best.pth"

@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.config import load_config
 from rk3588_mobile_sr.data.mlvc_loader import MLVCTrainLoader, build_mlvc_loaders
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import MobileOneSR
 from rk3588_mobile_sr.utils.traceml_profiling import add_traceml_args
 
 
@@ -51,11 +51,13 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--sequence_frames", type=int, default=None)
     parser.add_argument("--q_indices", nargs="+", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=None)
-    parser.add_argument("--scale", type=int, default=3)
-    parser.add_argument("--num_channels", type=int, default=32)
-    parser.add_argument("--num_blocks", type=int, default=8)
-    parser.add_argument("--num_conv_branches", type=int, default=4)
-    parser.add_argument("--negative_slope", type=float, default=0.1)
+    parser.add_argument("--scale", type=int, default=None)
+    parser.add_argument("--num_channels", type=int, default=None)
+    parser.add_argument("--num_blocks", type=int, default=None)
+    parser.add_argument("--phase_factor", type=int, default=None)
+    parser.add_argument("--output_kernel_size", type=int, choices=[1, 3], default=None)
+    parser.add_argument("--num_conv_branches", type=int, default=None)
+    parser.add_argument("--negative_slope", type=float, default=None)
     parser.add_argument(
         "--colorspace",
         type=str,
@@ -65,8 +67,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--patch_size", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=2, help="per-GPU sequence batch size")
-    parser.add_argument("--epochs", type=int, default=600)
-    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
         "--prefetch_batches",
         type=int,
@@ -145,6 +145,23 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     add_traceml_args(parser)
     return parser
+
+
+def resolve_model_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Fill model CLI values from the selected YAML configuration."""
+    model_cfg = load_config(getattr(args, "config", None)).model
+    for name in (
+        "scale",
+        "num_channels",
+        "num_blocks",
+        "phase_factor",
+        "output_kernel_size",
+        "num_conv_branches",
+        "negative_slope",
+    ):
+        if getattr(args, name, None) is None:
+            setattr(args, name, getattr(model_cfg, name))
+    return args
 
 
 @dataclass
@@ -249,28 +266,6 @@ def _normalize_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torc
     return normalized
 
 
-def load_training_checkpoint(
-    path: str | Path,
-    model: nn.Module,
-    optimizer: optim.Optimizer,
-    scheduler: optim.lr_scheduler.LRScheduler,
-    *,
-    train_accel: TrainAccel | None = None,
-    device: torch.device | None = None,
-) -> int:
-    """Restore model/optimizer/scheduler (and AMP scaler) from a stage checkpoint."""
-    raw = torch.load(path, map_location=device or "cpu", weights_only=False)
-    if not isinstance(raw, dict) or "state_dict" not in raw:
-        raise TypeError(f"Expected full training checkpoint in {path}")
-    unwrap = _training_module_for_state_dict(model)
-    unwrap.load_state_dict(_normalize_state_dict(raw["state_dict"]), strict=True)
-    optimizer.load_state_dict(raw["optimizer"])
-    scheduler.load_state_dict(raw["scheduler"])
-    if train_accel is not None and train_accel.scaler is not None and "scaler" in raw:
-        train_accel.scaler.load_state_dict(raw["scaler"])
-    return int(raw.get("step", 0))
-
-
 def build_model(
     args: argparse.Namespace,
     device: torch.device,
@@ -279,14 +274,17 @@ def build_model(
     weight_path: str | None = None,
     strict_load: bool = True,
 ) -> MobileOneSR:
-    """Build a MobileOneSR model and optionally load pretrained weights."""
+    """Build the E-architecture SR model and optionally load pretrained weights."""
+    resolve_model_args(args)
     model = MobileOneSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
+        phase_factor=args.phase_factor,
+        output_kernel_size=args.output_kernel_size,
         num_conv_branches=args.num_conv_branches,
         inference_mode=inference_mode,
-        negative_slope=getattr(args, "negative_slope", 0.1),
+        negative_slope=args.negative_slope,
     ).to(device)
     if weight_path is not None:
         raw = torch.load(weight_path, map_location=device, weights_only=False)
@@ -386,7 +384,3 @@ def save_checkpoint_dict(
         best_metric_tracker["value"] = metric
     torch.save(state_dict, path)
     return True
-
-
-def make_optimizer(model: nn.Module, lr: float) -> optim.Adam:
-    return optim.Adam(model.parameters(), lr=lr, betas=(0.9, 0.999))

@@ -8,16 +8,22 @@ def test_load_default_config():
     assert isinstance(cfg, AppConfig)
     assert cfg.model.scale == 3
     assert cfg.model.num_channels == 32
+    assert cfg.model.num_blocks == 6
+    assert cfg.model.phase_factor == 2
+    assert cfg.model.output_kernel_size == 3
     assert cfg.model.negative_slope == 0.1
     assert cfg.data.colorspace == "yuv"
     assert cfg.data.dataset_description.endswith("description.json")
     assert cfg.data.mlvc_variant == "small"
     assert cfg.data.q_indices == (0, 21, 42, 63)
     assert cfg.data.lr_size == (360, 640)
-    assert cfg.stage1.patch_size == 128
+    assert cfg.training.patch_size == 128
+    assert cfg.training.float_patience == 10
+    assert cfg.training.qat_patience == 5
     assert cfg.deploy.input_h == 360
     assert cfg.deploy.rknn_python == ".venv-rknn/bin/python"
     assert cfg.deploy.rknn_quantize == "kl_divergence"
+    assert cfg.deploy.target == "rk3576"
 
 
 def test_load_config_from_path():

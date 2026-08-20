@@ -32,8 +32,17 @@ setup_resume_args() {
   local save_dir="${1:?save_dir required}"
   RESUME_ARGS=()
   local resume="${RESUME:-}"
-  if [[ -z "$resume" && -f "${save_dir}/best.pth" ]]; then
-    resume="${save_dir}/best.pth"
+  if [[ -z "$resume" ]]; then
+    local candidate
+    for candidate in \
+      "${save_dir}/last.pth" \
+      "${save_dir}/qat_observe/last.pth" \
+      "${save_dir}/float/last.pth"; do
+      if [[ -f "$candidate" ]]; then
+        resume="$candidate"
+        break
+      fi
+    done
   fi
   if [[ -n "$resume" && -f "$resume" ]]; then
     echo "[$(date -Is)] resuming from $resume" >&2

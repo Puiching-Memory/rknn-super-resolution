@@ -10,7 +10,7 @@ from contextlib import contextmanager
 import torch
 import torch.nn as nn
 
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import MobileOneSR
 
 
 def _unwrap(model: nn.Module) -> nn.Module:

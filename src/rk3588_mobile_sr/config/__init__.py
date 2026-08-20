@@ -16,7 +16,9 @@ class ModelConfig:
     in_channels: int = 3
     out_channels: int = 3
     num_channels: int = 32
-    num_blocks: int = 8
+    num_blocks: int = 6
+    phase_factor: int = 2
+    output_kernel_size: int = 3
     num_conv_branches: int = 4
     negative_slope: float = 0.1
 
@@ -42,36 +44,38 @@ class DataConfig:
 
 
 @dataclass
-class Stage1Config:
+class TrainingConfig:
     patch_size: int = 128
     batch_size: int = 2
-    max_steps: int = 100_000
-    early_stop_patience: int = 10
-    early_stop_min_delta: float = 0.1
+    qat_patch_size: int = 144
+    qat_batch_size: int = 1
+    log_every: int = 500
     val_every: int = 1000
-    lr: float = 1e-3
-    loss: str = "l1"
-
-
-@dataclass
-class Stage2QatConfig:
-    patch_size: int = 144
-    batch_size: int = 1
-    max_steps: int = 15_000
-    phase1_steps: int = 3000
-    phase2_steps: int = 9000
-    val_every: int = 1000
-    lr: float = 1e-6
+    save_every: int = 5000
+    float_lr: float = 1e-3
+    qat_lr: float = 1e-6
+    float_patience: int = 10
+    float_min_delta: float = 0.1
+    float_min_evaluations: int = 12
+    float_safety_max_steps: int = 100_000
+    observer_patience: int = 3
+    observer_min_delta: float = 0.02
+    observer_min_evaluations: int = 5
+    observer_safety_max_steps: int = 15_000
+    qat_patience: int = 5
+    qat_min_delta: float = 0.02
+    qat_min_evaluations: int = 7
+    qat_safety_max_steps: int = 30_000
     clip_min: float = -1.0
     clip_max: float = 1.0
     ema_decay: float = 0.999
     bn_batches: int = 64
     backend: str = "qnnpack"
-    stage1_weight: str = "checkpoints/stage1/best.pth"
 
 
 @dataclass
 class DeployConfig:
+    target: str = "rk3576"
     input_h: int = 360
     input_w: int = 640
     onnx_output: str = "mobileone_sr_x3.onnx"
@@ -88,8 +92,7 @@ class DeployConfig:
 class AppConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     data: DataConfig = field(default_factory=DataConfig)
-    stage1: Stage1Config = field(default_factory=Stage1Config)
-    stage2_qat: Stage2QatConfig = field(default_factory=Stage2QatConfig)
+    training: TrainingConfig = field(default_factory=TrainingConfig)
     deploy: DeployConfig = field(default_factory=DeployConfig)
 
 
@@ -123,8 +126,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     return AppConfig(
         model=_merge_dataclass(ModelConfig, raw.get("model")),
         data=_merge_dataclass(DataConfig, raw.get("data")),
-        stage1=_merge_dataclass(Stage1Config, raw.get("stage1")),
-        stage2_qat=_merge_dataclass(Stage2QatConfig, raw.get("stage2_qat")),
+        training=_merge_dataclass(TrainingConfig, raw.get("training")),
         deploy=_merge_dataclass(DeployConfig, raw.get("deploy")),
     )
 

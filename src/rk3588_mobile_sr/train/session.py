@@ -96,6 +96,7 @@ class TrainSession:
         early_stop: EarlyStopState | None = None,
         model_diag: bool = True,
         global_step: int = 0,
+        save_dir: Path | str | None = None,
     ) -> int:
         trainer = StepTrainer(
             self.ctx,
@@ -106,7 +107,7 @@ class TrainSession:
             hooks,
             train_accel=train_accel,
             val_loader=loaders.val,
-            save_dir=self.save_dir,
+            save_dir=Path(save_dir) if save_dir is not None else self.save_dir,
             validation_config=validation_config,
             early_stop=early_stop,
             model_diag=model_diag,

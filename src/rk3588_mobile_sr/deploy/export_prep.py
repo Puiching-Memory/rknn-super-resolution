@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
-from torchvision.io import read_image
-from torchvision.transforms.functional import convert_image_dtype, resize
 
-from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import MobileOneSR
 from rk3588_mobile_sr.models.qat_utils import bn_recalibrate
 
 
@@ -36,15 +34,25 @@ def _load_calib_batch(
     *,
     input_h: int,
     input_w: int,
+    phase_factor: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Load one LR image as MLVC BT.709 YCbCr444 in [0, 255]."""
-    img = read_image(str(path))
-    if img.shape[0] == 1:
-        img = img.repeat(3, 1, 1)
-    img = convert_image_dtype(img, torch.float32) * 255.0
-    img = resize(img, [input_h, input_w], antialias=True)
-    return rgb_to_yuv444(img.unsqueeze(0)).to(device)
+    """Load phase-packed YCbCr calibration data and restore the training input."""
+    array = np.load(path)
+    phases = torch.from_numpy(array)
+    if phases.ndim == 3:
+        phases = phases.unsqueeze(0)
+    expected_channels = 3 * phase_factor * phase_factor
+    if phases.ndim != 4 or phases.shape[1] != expected_channels:
+        raise ValueError(
+            f"Expected NCHW calibration with {expected_channels} channels, got {phases.shape}"
+        )
+    lr = torch.nn.functional.pixel_shuffle(phases.to(device).float(), phase_factor)
+    if lr.shape[-2:] != (input_h, input_w):
+        raise ValueError(
+            f"Expected calibration size {(input_h, input_w)}, got {tuple(lr.shape[-2:])}"
+        )
+    return lr
 
 
 def recalibrate_bn_from_calib_list(
@@ -70,7 +78,11 @@ def recalibrate_bn_from_calib_list(
         def __iter__(self):
             for path in self.image_paths:
                 lr = _load_calib_batch(
-                    Path(path), input_h=input_h, input_w=input_w, device=device
+                    Path(path),
+                    input_h=input_h,
+                    input_w=input_w,
+                    phase_factor=model.phase_factor,
+                    device=device,
                 )
                 yield lr, lr
 

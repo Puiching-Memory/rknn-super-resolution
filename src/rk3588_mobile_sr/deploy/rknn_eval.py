@@ -203,11 +203,49 @@ def mlvc_ycbcr_to_rgb(ycbcr: np.ndarray) -> np.ndarray:
 def infer_rknn_rgb(
     runtime: _RknnRuntime,
     lr_rgb: np.ndarray,
+    *,
+    phase_factor: int = 2,
+    scale: int = 3,
 ) -> np.ndarray:
     """Run a YCbCr444 RKNN model and return its output in RGB."""
     ycbcr = np.rint(rgb_to_mlvc_ycbcr(lr_rgb)).astype(np.uint8)
-    outputs = runtime.inference(inputs=[ycbcr[np.newaxis]], data_format="nhwc")
-    return mlvc_ycbcr_to_rgb(_rknn_output_to_hwc(outputs[0]))
+    packed = pixel_unshuffle_hwc_to_nchw(ycbcr, phase_factor)
+    outputs = runtime.inference(inputs=[packed], data_format="nchw")
+    unpacked = pixel_shuffle_nchw_to_hwc(outputs[0], scale * phase_factor)
+    return mlvc_ycbcr_to_rgb(np.clip(unpacked, 0.0, 255.0))
+
+
+def pixel_unshuffle_hwc_to_nchw(image: np.ndarray, factor: int) -> np.ndarray:
+    """Pack an HWC image using PyTorch-compatible PixelUnshuffle ordering."""
+    height, width, channels = image.shape
+    if height % factor or width % factor:
+        raise ValueError("image dimensions must be divisible by factor")
+    nchw = np.transpose(image, (2, 0, 1))[np.newaxis]
+    packed = nchw.reshape(
+        1, channels, height // factor, factor, width // factor, factor
+    ).transpose(0, 1, 3, 5, 2, 4)
+    return packed.reshape(1, channels * factor * factor, height // factor, width // factor)
+
+
+def pixel_shuffle_nchw_to_hwc(phases: np.ndarray, factor: int) -> np.ndarray:
+    """Unpack an NCHW tensor using PyTorch-compatible PixelShuffle ordering."""
+    array = np.asarray(phases)
+    if array.ndim == 3:
+        array = array[np.newaxis]
+    if array.ndim != 4 or array.shape[0] != 1:
+        raise ValueError(f"expected a single NCHW tensor, got shape {array.shape}")
+    _, packed_channels, height, width = array.shape
+    divisor = factor * factor
+    if packed_channels % divisor:
+        raise ValueError("channel count must be divisible by factor squared")
+    channels = packed_channels // divisor
+    unpacked = array.reshape(1, channels, factor, factor, height, width).transpose(
+        0, 1, 4, 2, 5, 3
+    )
+    return np.transpose(
+        unpacked.reshape(1, channels, height * factor, width * factor)[0],
+        (1, 2, 0),
+    )
 
 
 def _normalize_state_dict(state_dict: dict) -> dict:
@@ -227,10 +265,12 @@ def load_fp32_predictor(
     num_blocks: int,
     num_conv_branches: int,
     device: str,
+    phase_factor: int = 2,
+    output_kernel_size: int = 3,
 ):
     import torch
 
-    from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+    from rk3588_mobile_sr.models import MobileOneSR
 
     dev = torch.device(device)
     model = MobileOneSR(
@@ -238,6 +278,8 @@ def load_fp32_predictor(
         num_channels=num_channels,
         num_blocks=num_blocks,
         num_conv_branches=num_conv_branches,
+        phase_factor=phase_factor,
+        output_kernel_size=output_kernel_size,
     ).to(dev)
     raw = torch.load(weight, map_location=dev, weights_only=False)
     if isinstance(raw, dict) and "state_dict" in raw:
@@ -268,6 +310,8 @@ def evaluate_accuracy(
     *,
     fp32_predictor,
     quant_mode: str,
+    phase_factor: int = 2,
+    scale: int = 3,
 ) -> AccuracyReport:
     if not pairs:
         raise ValueError("No validation images found for RKNN accuracy eval.")
@@ -280,7 +324,12 @@ def evaluate_accuracy(
     match_psnrs: list[float] = []
 
     for pair in pairs:
-        sr_rknn = infer_rknn_rgb(runtime, pair.lr_rgb)
+        sr_rknn = infer_rknn_rgb(
+            runtime,
+            pair.lr_rgb,
+            phase_factor=phase_factor,
+            scale=scale,
+        )
         rknn_psnrs.append(psnr_numpy(sr_rknn, pair.hr_rgb))
         rknn_ssims.append(ssim_numpy(sr_rknn, pair.hr_rgb))
 
@@ -357,7 +406,13 @@ def format_accuracy_table(report: AccuracyReport) -> str:
     return "\n".join(lines)
 
 
-def add_eval_args(parser: argparse.ArgumentParser) -> None:
+def add_eval_args(parser: argparse.ArgumentParser, model_config=None) -> None:
+    scale = getattr(model_config, "scale", 3)
+    num_channels = getattr(model_config, "num_channels", 32)
+    num_blocks = getattr(model_config, "num_blocks", 6)
+    phase_factor = getattr(model_config, "phase_factor", 2)
+    output_kernel_size = getattr(model_config, "output_kernel_size", 3)
+    num_conv_branches = getattr(model_config, "num_conv_branches", 4)
     parser.add_argument(
         "--eval",
         action=argparse.BooleanOptionalAction,
@@ -372,10 +427,14 @@ def add_eval_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--hr_dir", type=str, default="data/DIV2K_valid_HR")
     parser.add_argument("--lr_dir", type=str, default="data/DIV2K_valid_LR_bicubic/X3")
-    parser.add_argument("--scale", type=int, default=3)
-    parser.add_argument("--num_channels", type=int, default=32)
-    parser.add_argument("--num_blocks", type=int, default=8)
-    parser.add_argument("--num_conv_branches", type=int, default=4)
+    parser.add_argument("--scale", type=int, default=scale)
+    parser.add_argument("--num_channels", type=int, default=num_channels)
+    parser.add_argument("--num_blocks", type=int, default=num_blocks)
+    parser.add_argument("--phase_factor", type=int, default=phase_factor)
+    parser.add_argument(
+        "--output_kernel_size", type=int, choices=[1, 3], default=output_kernel_size
+    )
+    parser.add_argument("--num_conv_branches", type=int, default=num_conv_branches)
     parser.add_argument("--eval_device", type=str, default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--max_images", type=int, default=100)
     parser.add_argument(
@@ -400,6 +459,8 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         return
 
     _, input_h, input_w = [int(x.strip()) for x in args.input_size.split(",")]
+    input_h *= args.phase_factor
+    input_w *= args.phase_factor
 
     fp32_predictor = None
     if args.weight:
@@ -410,6 +471,8 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
                 num_channels=args.num_channels,
                 num_blocks=args.num_blocks,
                 num_conv_branches=args.num_conv_branches,
+                phase_factor=args.phase_factor,
+                output_kernel_size=args.output_kernel_size,
                 device=args.eval_device,
             )
         except (ImportError, ModuleNotFoundError) as exc:
@@ -430,6 +493,8 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         pairs,
         fp32_predictor=fp32_predictor,
         quant_mode=quant_mode,
+        phase_factor=args.phase_factor,
+        scale=args.scale,
     )
     print()
     print(format_accuracy_table(report))

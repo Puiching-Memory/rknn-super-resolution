@@ -34,6 +34,7 @@ class TrainHooks:
     on_save_best: Callable[[Path, int], None] | None = None
     on_save_last: Callable[[int, Path], None] | None = None
     log_train_metrics: Callable[[dict[str, float], int], None] | None = None
+    on_validation: Callable[[object], None] | None = None
 
 
 @dataclass

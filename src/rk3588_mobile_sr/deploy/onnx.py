@@ -13,32 +13,36 @@ from rk3588_mobile_sr.deploy.export_prep import (
     fused_weight_report,
     prepare_float_for_export,
 )
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import MobileOneSR
 from rk3588_mobile_sr.models.qat_utils import load_deploy_float_from_qat_checkpoint
-from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict, require_cuda
+from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict
 
 
-class _NHWCOutputWrapper(nn.Module):
-    """Append NCHW -> NHWC permute for RKNN / RGA-friendly output layout."""
+class _CoreWrapper(nn.Module):
+    """Expose only the NPU-resident phase-domain graph for export."""
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: MobileOneSR) -> None:
         super().__init__()
         self.model = model
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x).permute(0, 2, 3, 1)
+        return self.model.forward_core(x)
 
 
 def parse_args():
     cfg = load_config()
     deploy = cfg.deploy
-    stage2 = cfg.stage2_qat
+    training = cfg.training
     parser = argparse.ArgumentParser()
     parser.add_argument("--weight", type=str, required=True)
     parser.add_argument("--output", type=str, default=deploy.onnx_output)
     parser.add_argument("--scale", type=int, default=cfg.model.scale)
     parser.add_argument("--num_channels", type=int, default=cfg.model.num_channels)
     parser.add_argument("--num_blocks", type=int, default=cfg.model.num_blocks)
+    parser.add_argument("--phase_factor", type=int, default=cfg.model.phase_factor)
+    parser.add_argument(
+        "--output_kernel_size", type=int, choices=[1, 3], default=cfg.model.output_kernel_size
+    )
     parser.add_argument("--num_conv_branches", type=int, default=cfg.model.num_conv_branches)
     parser.add_argument("--qat", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -46,9 +50,10 @@ def parse_args():
         action="store_true",
         help="Load a Stage-2 QAT checkpoint (fused deploy graph, fake-quant disabled).",
     )
-    parser.add_argument("--backend", type=str, default=stage2.backend)
+    parser.add_argument("--backend", type=str, default=training.backend)
     parser.add_argument("--input_h", type=int, default=deploy.input_h)
     parser.add_argument("--input_w", type=int, default=deploy.input_w)
+    parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument(
         "--static",
         action="store_true",
@@ -66,51 +71,36 @@ def parse_args():
         default=deploy.calib_dir,
         help="Text file listing LR images for BN recalibration.",
     )
-    parser.add_argument("--bn_batches", type=int, default=stage2.bn_batches)
+    parser.add_argument("--bn_batches", type=int, default=training.bn_batches)
     parser.add_argument(
         "--identity-var-floor",
         type=float,
         default=1e-2,
         help="Lower bound on identity BN running_var during deploy fuse (0=disable).",
     )
-    parser.add_argument("--clip-min", type=float, default=stage2.clip_min)
-    parser.add_argument("--clip-max", type=float, default=stage2.clip_max)
+    parser.add_argument("--clip-min", type=float, default=training.clip_min)
+    parser.add_argument("--clip-max", type=float, default=training.clip_max)
     parser.add_argument(
         "--weight-clip",
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Clip fused conv weights after deploy fuse. Default: on for --from-qat, off for float.",
     )
-    parser.add_argument(
-        "--output-nhwc",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Permute ONNX output to NHWC (1,H,W,3). Default off: adds RKNN Transpose, "
-            "~3x internal memory vs NCHW; prefer NCHW export + on-board RGA convert."
-        ),
-    )
     return parser.parse_args()
-
-
-def _warn_output_nhwc_enabled() -> None:
-    print(
-        "WARNING: --output-nhwc appends NCHW→NHWC Transpose in the graph. "
-        "RKNN may insert an extra layout op (~32 MB/frame RW at 1080p) and internal "
-        "tensor memory can grow ~3x vs default NCHW. Accuracy is unchanged; latency/"
-        "memory usually favor NCHW export + RGA format convert on the board."
-    )
 
 
 def main():
     args = parse_args()
-    require_cuda()
-    device = torch.device("cuda")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("--device cuda requested but CUDA is unavailable")
+    device = torch.device(args.device)
 
     model = MobileOneSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
+        phase_factor=args.phase_factor,
+        output_kernel_size=args.output_kernel_size,
         num_conv_branches=args.num_conv_branches,
     ).to(device)
     raw = torch.load(args.weight, map_location=device, weights_only=False)
@@ -156,13 +146,20 @@ def main():
             do_bn_recalibrate=args.bn_recalibrate,
         )
 
-    if args.output_nhwc:
-        _warn_output_nhwc_enabled()
-        model = _NHWCOutputWrapper(model)
-        model.eval()
-        print("--> Output layout: NHWC (1, H, W, 3)")
-
-    dummy_input = torch.randn(1, 3, args.input_h, args.input_w).to(device)
+    if args.input_h % model.phase_factor or args.input_w % model.phase_factor:
+        raise ValueError("input_h and input_w must be divisible by phase_factor")
+    core_h = args.input_h // model.phase_factor
+    core_w = args.input_w // model.phase_factor
+    core_channels = model.core_in_channels
+    core_output_channels = model.core_out_channels
+    model = _CoreWrapper(model)
+    print(
+        "--> Phase-core contract: "
+        f"NCHW (1,{core_channels},{core_h},{core_w}) -> "
+        f"(1,{core_output_channels},{core_h},{core_w}); "
+        "CPU PixelUnshuffle/PixelShuffle excluded"
+    )
+    dummy_input = torch.randn(1, core_channels, core_h, core_w).to(device)
     export_kwargs: dict = {
         "input_names": ["input"],
         "output_names": ["output"],

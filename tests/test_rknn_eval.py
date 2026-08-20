@@ -16,13 +16,12 @@ from rk3588_mobile_sr.deploy.rknn_eval import (
 )
 
 
-class _FakeRuntime:
+class _FakePhaseRuntime:
     def inference(self, inputs, data_format=None):
-        lr = inputs[0][0].astype(np.float32)
-        h, w, _ = lr.shape
-        out = np.repeat(np.repeat(lr, 3, axis=0), 3, axis=1)
-        out = np.transpose(out, (2, 0, 1))
-        return [out[None, ...]]
+        packed = inputs[0]
+        assert packed.shape[1] == 12
+        assert data_format == "nchw"
+        return [np.zeros((1, 108, packed.shape[2], packed.shape[3]), dtype=np.float32)]
 
 
 def test_psnr_identical_is_inf():
@@ -54,11 +53,15 @@ def test_format_accuracy_table_with_fp32():
     assert "FP32 vs RKNN output PSNR" in text
 
 
-def test_infer_rknn_rgb_nhwc_batch():
-    lr = np.zeros((360, 640, 3), dtype=np.uint8)
-    lr[0, 0] = (10, 20, 30)
-    out = infer_rknn_rgb(_FakeRuntime(), lr)
-    assert out.shape == (1080, 1920, 3)
+def test_infer_rknn_rgb_phase_core_contract():
+    lr = np.zeros((12, 16, 3), dtype=np.uint8)
+    out = infer_rknn_rgb(
+        _FakePhaseRuntime(),
+        lr,
+        phase_factor=2,
+        scale=3,
+    )
+    assert out.shape == (36, 48, 3)
     assert out.dtype == np.float32
 
 

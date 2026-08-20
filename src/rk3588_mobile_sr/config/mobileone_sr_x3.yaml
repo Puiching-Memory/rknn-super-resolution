@@ -3,7 +3,9 @@ model:
   in_channels: 3
   out_channels: 3
   num_channels: 32
-  num_blocks: 8
+  num_blocks: 6
+  phase_factor: 2
+  output_kernel_size: 3
   num_conv_branches: 4
   negative_slope: 0.1
 
@@ -25,32 +27,36 @@ data:
   prefetch_batches: 1
   mlvc_amp: true
 
-stage1:
+training:
   patch_size: 128
   batch_size: 2
-  max_steps: 100000
-  early_stop_patience: 10
-  early_stop_min_delta: 0.1
+  qat_patch_size: 144
+  qat_batch_size: 1
+  log_every: 500
   val_every: 1000
-  lr: 1.0e-3
-  loss: "l1"
-
-stage2_qat:
-  patch_size: 144
-  batch_size: 1
-  max_steps: 15000
-  phase1_steps: 3000
-  phase2_steps: 9000
-  val_every: 1000
-  lr: 1.0e-6
+  save_every: 5000
+  float_lr: 1.0e-3
+  qat_lr: 1.0e-6
+  float_patience: 10
+  float_min_delta: 0.1
+  float_min_evaluations: 12
+  float_safety_max_steps: 100000
+  observer_patience: 3
+  observer_min_delta: 0.02
+  observer_min_evaluations: 5
+  observer_safety_max_steps: 15000
+  qat_patience: 5
+  qat_min_delta: 0.02
+  qat_min_evaluations: 7
+  qat_safety_max_steps: 30000
   clip_min: -1.0
   clip_max: 1.0
   ema_decay: 0.999
   bn_batches: 64
   backend: "qnnpack"
-  stage1_weight: "checkpoints/stage1/best.pth"
 
 deploy:
+  target: "rk3576"
   input_h: 360
   input_w: 640
   onnx_output: "mobileone_sr_x3.onnx"

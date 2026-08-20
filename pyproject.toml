@@ -1,7 +1,7 @@
 [project]
 name = "rk3588-mobile-sr"
 version = "0.1.0"
-description = "RK3588 frozen-MLVC video reconstruction and MobileOne 3x super-resolution"
+description = "RK3576 frozen-MLVC video reconstruction and Phase-MobileOne 3x super-resolution"
 readme = "README.md"
 requires-python = "==3.12.*"
 license = { text = "MIT" }
@@ -31,8 +31,7 @@ dependencies = [
 
 [project.scripts]
 rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
-rk3588-train-stage1 = "rk3588_mobile_sr.train.stage1:main"
-rk3588-train-stage2 = "rk3588_mobile_sr.train.stage2:main"
+rk3588-train = "rk3588_mobile_sr.train.unified:main"
 rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
