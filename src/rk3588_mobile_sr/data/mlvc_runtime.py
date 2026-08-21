@@ -70,7 +70,7 @@ def _import_mlvc_factory(repo: Path):
     package_root = video_root / "src"
     if not package_root.is_dir():
         raise FileNotFoundError(
-            f"MLVC source not found at {package_root}; run ./scripts/setup_mlvc.sh"
+            f"MLVC source not found at {package_root}; clone submodules or run ./scripts/setup_mlvc.sh"
         )
     existing = sys.modules.get("src")
     if existing is not None:

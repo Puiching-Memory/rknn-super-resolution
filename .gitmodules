@@ -1,0 +1,6 @@
+[submodule "third_party/mlvc"]
+	path = third_party/mlvc
+	url = https://github.com/microsoft/mlvc.git
+[submodule "third_party/vmaf"]
+	path = third_party/vmaf
+	url = https://github.com/Netflix/vmaf.git

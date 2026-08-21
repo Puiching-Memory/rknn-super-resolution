@@ -11,6 +11,7 @@
 ## 环境与工具链
 
 - 只用 **`uv`** 管理依赖（`uv sync`）；除非用户明确要求，不用 `pip`。
+- `third_party/mlvc` 与 `third_party/vmaf` 是 git 子模块；克隆用 `--recurse-submodules`，不要再 gitignore 后自行 clone。
 - 训练栈绑定 **CUDA 13.0 / cu130**；RKNN 工具链与主环境 torch 版本冲突，**隔离在 `.venv-rknn`**，不并入主依赖。
 - 校验改动：`uv run pytest`、`uv run ruff check src tests`（配置见 `pyproject.toml`）。
 

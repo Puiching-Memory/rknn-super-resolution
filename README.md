@@ -53,7 +53,7 @@ src/rk3588_mobile_sr/
 └── utils/                  指标、SwanLab、TraceML
 
 scripts/
-├── setup_mlvc.sh           固定 MLVC 源码、权重与 OpenVidHD 索引
+├── setup_mlvc.sh           初始化 MLVC 子模块、权重与 OpenVidHD 索引
 ├── run_train_8gpu.sh       统一 DDP 训练
 └── setup_vmaf.sh           可选 VMAF 环境
 ```
@@ -64,6 +64,14 @@ scripts/
 NVDEC；否则按帧调用图像解码器。
 
 ## 环境
+
+克隆时一并检出子模块（`third_party/mlvc`、`third_party/vmaf`）：
+
+```bash
+git clone --recurse-submodules https://github.com/Puiching-Memory/rk3588_mobile_sr.git
+# 已有工作副本：
+git submodule update --init --recursive
+```
 
 项目只使用 `uv` 管理主训练环境：
 
@@ -89,8 +97,7 @@ MLVC 不是主项目依赖包。本项目动态加载
 
 脚本会：
 
-1. 将 MLVC 固定到 commit
-   `e9f0114d71e886d7952af2a7a3c20b680443925f`。
+1. `git submodule update --init` 检出本仓库记录的 MLVC 提交。
 2. 下载 `mlvc-s-psnr-v1.ckpt` 并校验官方 SHA256。
 3. 下载官方 `openvidhd_60k64_frame_sequences.csv`。
 

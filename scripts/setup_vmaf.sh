@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 # Build Netflix libvmaf (VMAF v1 models) into .local/ for validation.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
 VENDOR="$ROOT/third_party/vmaf"
 PREFIX="$ROOT/.local"
 
-if [[ ! -d "$VENDOR/.git" ]]; then
-  mkdir -p "$ROOT/third_party"
-  git clone --depth 1 https://github.com/Netflix/vmaf.git "$VENDOR"
-fi
+ensure_submodule "third_party/vmaf"
 
 uv pip install 'meson>=1.0' ninja
 MESON="${MESON:-$ROOT/.venv/bin/meson}"

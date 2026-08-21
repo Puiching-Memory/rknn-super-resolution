@@ -16,6 +16,15 @@ export LD_LIBRARY_PATH="$ROOT/.local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 # SwanLab SDK parses SWANLAB_EXPERIMENT as JSON on import.
 unset SWANLAB_EXPERIMENT SWANLAB_RESUME SWANLAB_RUN_ID
 
+ensure_submodule() {
+  local path="${1:?submodule path required}"
+  if [[ ! -f "$ROOT/.gitmodules" ]]; then
+    echo "error: missing .gitmodules; clone with --recurse-submodules" >&2
+    exit 1
+  fi
+  git -C "$ROOT" submodule update --init --recursive -- "$path"
+}
+
 run_uv() {
   uv run "$@"
 }
