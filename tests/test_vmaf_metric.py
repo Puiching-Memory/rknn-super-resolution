@@ -36,7 +36,7 @@ def test_batch_vmaf_identical_near_100():
     from rk3588_mobile_sr.utils.vmaf_metric import ensure_vmaf_runtime_env
 
     ensure_vmaf_runtime_env()
-    # SpEED in VMAF v1 needs >= ~384px; match stage1 HR patch (128*3).
+    # SpEED in VMAF v1 needs >= ~384px; 384 matches 128 LR patch at 3x.
     x = torch.rand(1, 3, 384, 384) * 255.0
     scores = batch_vmaf(x, x.clone(), model="1080p")
     assert scores.shape == (1,)

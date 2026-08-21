@@ -6,7 +6,7 @@ latent 量化之后的重建帧：
 
 ```text
 OpenVidHD 连续帧
-  -> 1920x1080 GT / Lanczos 下采样 640x360
+  -> 1920x1080 GT / GPU bicubic 下采样 640x360
   -> 冻结 MLVC-S（DPB + round 量化闭环，不执行 rANS）
   -> MobileOneSR x3
   -> 1920x1080
@@ -19,7 +19,7 @@ MobileOneSR，也不改变 1920x1080 输出契约。
 ## 关键设计
 
 - 数据集使用与 MLVC 相同的 OpenVidHD 60k x 64 frame sequences。
-- 每个样本读取连续帧，首帧作为干净 DPB reference，后续帧保持
+- 每个样本采样连续 clip，首帧作为干净 DPB reference，后续帧保持
   `ref_frame`、`ref_feature` 闭环传播。
 - MLVC 使用 eval 模式的真实 `round` 量化；训练直接调用 `compress_core()`，
   跳过 bit-estimate、rANS 和码流封装，因而不产生传统 codec cache。
@@ -41,9 +41,10 @@ MobileOneSR，也不改变 1920x1080 输出契约。
 src/rk3588_mobile_sr/
 ├── config/                 默认 YAML 配置
 ├── data/
-│   ├── openvid.py          OpenVidHD 连续序列读取
+│   ├── openvid.py          OpenVidHD 连续序列索引
+│   ├── decode.py           TorchCodec GPU 解码与 canvas 几何
 │   ├── mlvc_runtime.py     冻结 MLVC-S 无码流量化闭环
-│   ├── mlvc_loader.py      CPU 读帧 + GPU MLVC batch processor
+│   ├── mlvc_loader.py      CPU 元数据 + GPU 解码 + MLVC batch processor
 │   └── yuv_utils.py        BT.709 full-range YCbCr444
 ├── models/                 MobileOneSR 与 QAT
 ├── train/                  单入口、平台期驱动的 FP32→QAT 训练
@@ -58,7 +59,9 @@ scripts/
 ```
 
 项目已删除传统 codec manifest、离线 mp4/.npy cache、Snakemake 和
-`--decode` 等旧接口。
+`--decode` 等旧接口。训练时若序列目录内存在 `sequence.mp4`（帧顺序与
+`description.json` 的 `frames` 一致），TorchCodec 优先对该视频做 GPU
+NVDEC；否则按帧调用图像解码器。
 
 ## 环境
 
@@ -70,9 +73,9 @@ uv run pytest
 uv run ruff check src tests
 ```
 
-Python 要求 3.12。PyTorch CUDA wheel 源以 `pyproject.toml` 为准。该环境只
-用于 GPU 训练机；RK3576 板端不要执行 `uv sync`，无需安装 CUDA/PyTorch。
-RKNN Toolkit 与主环境的 torch 版本冲突，应继续使用独立
+Python 要求 3.12。PyTorch / TorchCodec CUDA wheel 源以 `pyproject.toml` 为准。
+该环境只用于 GPU 训练机；RK3576 板端不要执行 `uv sync`，无需安装
+CUDA/PyTorch。RKNN Toolkit 与主环境的 torch 版本冲突，应继续使用独立
 `.venv-rknn`。
 
 MLVC 不是主项目依赖包。本项目动态加载
@@ -116,6 +119,7 @@ data/OpenVidHD/openvidhd_60k_train64/
 ├── description.json
 ├── frame_sequences.csv
 ├── <sequence_id_00000>/
+│   ├── sequence.mp4            # 可选；存在时优先 NVDEC
 │   ├── im00000.webp
 │   ├── im00001.webp
 │   └── ...
@@ -187,8 +191,10 @@ uv run torchrun --nproc_per_node=8 -m rk3588_mobile_sr.train.unified \
   --save_dir checkpoints/train
 ```
 
-每个 GPU 都持有独立冻结 MLVC-S。CPU workers 只读取连续图像并完成一致
-crop/flip，RGB->YCbCr、MLVC 重建和 patch crop 在对应 GPU 上执行。
+每个 GPU 都持有独立冻结 MLVC-S。CPU workers 只采样 clip 元数据（路径、
+帧序号、crop/flip）；TorchCodec 在对应 GPU 上解码，随后完成 RGB->YCbCr、
+MLVC 重建和 patch crop。视频源默认走 NVDEC；NVDEC 不可用时 TorchCodec
+会回退到 CPU 解码并把张量放到训练 GPU 上。
 
 训练是一个作业、一条全局 step 时间线和一个 checkpoint 根目录。状态机为：
 

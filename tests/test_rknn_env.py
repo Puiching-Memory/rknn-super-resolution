@@ -26,12 +26,15 @@ def test_resolve_rknn_python_from_config(monkeypatch):
     assert path == (_project_root() / ".venv-rknn/bin/python").absolute()
 
 
-def test_needs_rknn_reexec_distinguishes_uv_venvs():
+def test_needs_rknn_reexec_distinguishes_uv_venvs(monkeypatch):
     from rk3588_mobile_sr.deploy.rknn_env import needs_rknn_reexec
 
     rknn_py = (_project_root() / ".venv-rknn/bin/python").absolute()
-    # Main .venv and .venv-rknn may share the same resolved base interpreter.
+    expected_prefix = rknn_py.parent.parent
+    monkeypatch.setattr("sys.prefix", "/tmp/main-venv")
     assert needs_rknn_reexec(rknn_py) is True
+    monkeypatch.setattr("sys.prefix", str(expected_prefix))
+    assert needs_rknn_reexec(rknn_py) is False
 
 
 def test_resolve_rknn_python_env_overrides_config(monkeypatch):

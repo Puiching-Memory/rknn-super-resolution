@@ -15,7 +15,7 @@ from rk3588_mobile_sr.distributed.model import is_compiled_module, unwrap_model
 from rk3588_mobile_sr.distributed.sync import rank0_section
 from rk3588_mobile_sr.utils.model_diagnostics import check_deploy_consistency
 from rk3588_mobile_sr.utils.run_logger import logger
-from rk3588_mobile_sr.utils.sr_metrics import ValidationMetrics, validate_ddp, validate_ddp_extended
+from rk3588_mobile_sr.utils.sr_metrics import ValidationMetrics, validate_ddp_extended
 from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, log_validation_sr_images
 from rk3588_mobile_sr.utils.vmaf_metric import DEFAULT_VMAF_MODEL
 
@@ -33,7 +33,7 @@ class ValidationConfig:
     deploy_check: bool = True
     vis_samples: int = 8
     vis_max_size: int = 768
-    colorspace: str = "rgb"
+    colorspace: str = "yuv"
     data_preview: bool = True
     final_preview: bool = True
 
@@ -112,28 +112,18 @@ class ValidationRunner:
         if self.ctx.is_main:
             logger.info("Step {} validation started", step)
 
-        if self.config.extended:
-            score, val_metrics = validate_ddp_extended(
-                self.model,
-                self.val_loader,
-                self.ctx.rank,
-                self.ctx.world_size,
-                scale=self.config.scale,
-                compute_dists=self.config.compute_dists,
-                compute_vmaf=self.config.compute_vmaf,
-                vmaf_model=self.config.vmaf_model,
-                vmaf_enc_size=self.config.vmaf_enc_size,
-                colorspace=self.config.colorspace,
-            )
-        else:
-            score = validate_ddp(
-                self.model,
-                self.val_loader,
-                self.ctx.rank,
-                self.ctx.world_size,
-                scale=self.config.scale,
-            )
-            val_metrics = None
+        score, val_metrics = validate_ddp_extended(
+            self.model,
+            self.val_loader,
+            self.ctx.rank,
+            self.ctx.world_size,
+            scale=self.config.scale,
+            compute_dists=self.config.compute_dists,
+            compute_vmaf=self.config.compute_vmaf,
+            vmaf_model=self.config.vmaf_model,
+            vmaf_enc_size=self.config.vmaf_enc_size,
+            colorspace=self.config.colorspace,
+        )
 
         improved, should_stop = self.early_stop.update(score)
         result = ValidationResult(

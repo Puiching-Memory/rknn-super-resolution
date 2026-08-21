@@ -1623,6 +1623,7 @@ dependencies = [
     { name = "scikit-image" },
     { name = "swanlab" },
     { name = "torch" },
+    { name = "torchcodec" },
     { name = "torchvision" },
     { name = "traceml-ai" },
     { name = "typer" },
@@ -1644,6 +1645,7 @@ requires-dist = [
     { name = "scikit-image", specifier = ">=0.21" },
     { name = "swanlab", specifier = ">=0.5.0" },
     { name = "torch", specifier = ">=2.12.0", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torchcodec", specifier = ">=0.16.0", index = "https://download.pytorch.org/whl/cu132" },
     { name = "torchvision", specifier = ">=0.27.0", index = "https://download.pytorch.org/whl/cu132" },
     { name = "traceml-ai", specifier = ">=0.3.1" },
     { name = "typer", specifier = ">=0.12.0" },
@@ -1955,6 +1957,16 @@ wheels = [
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-manylinux_2_28_aarch64.whl", upload-time = "2026-07-08T11:20:33Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-manylinux_2_28_x86_64.whl", upload-time = "2026-07-08T11:20:34Z" },
     { url = "https://download-r2.pytorch.org/whl/cu132/torch-2.13.0%2Bcu132-cp312-cp312-win_amd64.whl", upload-time = "2026-07-08T11:20:36Z" },
+]
+
+[[package]]
+name = "torchcodec"
+version = "0.16.0+cu132"
+source = { registry = "https://download.pytorch.org/whl/cu132" }
+wheels = [
+    { url = "https://download.pytorch.org/whl/cu132/torchcodec-0.16.0%2Bcu132-cp312-cp312-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:bf115770d094f76725f3193d181936d94b2820adc2cef17346164272c1533943", upload-time = "2026-08-13T12:00:28Z" },
+    { url = "https://download.pytorch.org/whl/cu132/torchcodec-0.16.0%2Bcu132-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:39919f91e411c273776c1fbfcd5fb2e3b39dcdd1702e979fe7d2f12de52fdffb", upload-time = "2026-08-13T12:00:29Z" },
+    { url = "https://download.pytorch.org/whl/cu132/torchcodec-0.16.0%2Bcu132-cp312-cp312-win_amd64.whl", hash = "sha256:c65af676995e2ff431e2e2cb7631adb7b98cdcf1732ff66c8b92fd3d13144a18", upload-time = "2026-08-13T12:00:30Z" },
 ]
 
 [[package]]

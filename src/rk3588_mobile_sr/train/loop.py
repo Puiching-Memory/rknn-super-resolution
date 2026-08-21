@@ -162,7 +162,9 @@ class StepTrainer:
 
         raw_loader = _unwrap_dataloader(self.train_loader)
         prefetcher = BatchPrefetcher(raw_loader, buffer_size=self.config.prefetch_batches)
-        prefetch_stream = torch.cuda.Stream(device=self.ctx.device)
+        prefetch_stream = (
+            torch.cuda.Stream(device=self.ctx.device) if self.ctx.device.type == "cuda" else None
+        )
         diag_tracker = (
             ForwardDiagnosticsTracker(self.model) if self.model_diag else None
         )
@@ -174,6 +176,12 @@ class StepTrainer:
 
         def _fetch_batch() -> tuple[torch.Tensor, torch.Tensor]:
             batch = next(prefetcher)
+            if prefetch_stream is None:
+                wait_ready = getattr(batch, "wait_ready", None)
+                if wait_ready is not None:
+                    wait_ready()
+                lr, hr = batch
+                return _to_device(lr, hr, self.ctx.device)
             with torch.cuda.stream(prefetch_stream):
                 wait_ready = getattr(batch, "wait_ready", None)
                 if wait_ready is not None:
@@ -185,7 +193,8 @@ class StepTrainer:
         try:
             pending_batch = _fetch_batch()
             while self.global_step < self.config.max_steps:
-                torch.cuda.current_stream(self.ctx.device).wait_stream(prefetch_stream)
+                if prefetch_stream is not None:
+                    torch.cuda.current_stream(self.ctx.device).wait_stream(prefetch_stream)
                 lr, hr = pending_batch
                 if self.global_step + 1 < self.config.max_steps:
                     pending_batch = _fetch_batch()

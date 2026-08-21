@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from rk3588_mobile_sr.data.mlvc_loader import (
@@ -21,6 +23,14 @@ class _LastFrameRuntime:
         return sequence[:, -1]
 
 
+class _TensorBatchDecoder:
+    def decode_batch(self, batch: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
+        return batch["lr_sequence"], batch["hr"]
+
+    def close(self) -> None:
+        return None
+
+
 def test_mlvc_colorspace_roundtrip():
     rgb = torch.rand(2, 3, 12, 20)
     restored = mlvc_ycbcr_to_rgb(rgb_to_mlvc_ycbcr(rgb))
@@ -31,6 +41,7 @@ def test_validation_processor_uses_fixed_q_and_canvas_shapes():
     runtime = _LastFrameRuntime()
     processor = MLVCBatchProcessor(
         runtime,
+        decoder=_TensorBatchDecoder(),
         device=torch.device("cpu"),
         q_indices=(0, 21, 42, 63),
         colorspace="yuv",
@@ -53,6 +64,7 @@ def test_validation_processor_uses_fixed_q_and_canvas_shapes():
 def test_training_processor_crops_scale_aligned_patches():
     processor = MLVCBatchProcessor(
         _LastFrameRuntime(),
+        decoder=_TensorBatchDecoder(),
         device=torch.device("cpu"),
         q_indices=(21,),
         colorspace="rgb",

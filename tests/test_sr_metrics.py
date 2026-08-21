@@ -32,11 +32,13 @@ def test_validation_metrics_to_log_dict():
         psnr_p10=29.0,
         psnr_p50=30.0,
         psnr_p90=31.0,
+        dists=0.12,
         vmaf=72.5,
     )
     logged = metrics.to_log_dict()
     assert logged["val/psnr"] == 30.0
     assert logged["val/vmaf"] == 72.5
+    assert logged["val/dists"] == 0.12
 
 
 def test_y_psnr_runs_on_batch():
@@ -45,3 +47,50 @@ def test_y_psnr_runs_on_batch():
     y_psnr = batch_y_psnr(pred, target, shave=3)
     assert y_psnr.shape == (2,)
     assert torch.all(y_psnr > 99.0)
+
+
+def test_validate_ddp_extended_yuv_uses_luma_and_skips_vmaf():
+    import torch.nn as nn
+
+    from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
+    from rk3588_mobile_sr.utils.sr_metrics import validate_ddp_extended
+
+    class _Passthrough(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_buffer("_device", torch.zeros(1))
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    class _Loader:
+        dataset = [0]
+        sampler = None
+
+        def __init__(self, batch: tuple[torch.Tensor, torch.Tensor]) -> None:
+            self._batch = batch
+
+        def __iter__(self):
+            yield self._batch
+
+        def __len__(self) -> int:
+            return 1
+
+    rgb = torch.zeros(1, 3, 24, 24)
+    rgb[:, 0] = 200.0
+    yuv = rgb_to_yuv444(rgb)
+    score, metrics = validate_ddp_extended(
+        _Passthrough(),
+        _Loader((yuv, yuv)),
+        rank=0,
+        world_size=1,
+        scale=3,
+        compute_dists=False,
+        compute_vmaf=False,
+        colorspace="yuv",
+    )
+    assert metrics is not None
+    assert score == metrics.psnr
+    assert metrics.psnr > 99.0
+    assert metrics.y_psnr > 99.0
+    assert metrics.vmaf is None

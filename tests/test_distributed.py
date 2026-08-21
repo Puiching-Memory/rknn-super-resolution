@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from rk3588_mobile_sr.distributed.context import DistributedContext
 from rk3588_mobile_sr.distributed.sync import rank0_section
-from rk3588_mobile_sr.distributed.validation import EarlyStopState, ValidationResult
+from rk3588_mobile_sr.distributed.validation import (
+    EarlyStopState,
+    ValidationConfig,
+    ValidationResult,
+)
 from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
 from rk3588_mobile_sr.train.loop import StepTrainer
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
@@ -44,12 +47,19 @@ def test_early_stop_improves_resets_patience():
     improved, stop = state.update(25.0)
     assert improved and not stop
     assert state.best_score == 25.0
-    assert state.best_psnr == 25.0  # legacy alias
     assert state.patience_counter == 0
 
     improved, stop = state.update(25.5)
     assert improved and not stop
     assert state.patience_counter == 0
+
+
+def test_early_stop_best_psnr_alias_tracks_score():
+    state = EarlyStopState(enabled=True, patience=3, min_delta=0.1)
+    state.update(25.0)
+    assert state.best_psnr == state.best_score
+    state.best_psnr = 31.0
+    assert state.best_score == 31.0
 
 
 def test_early_stop_triggers_after_patience():
@@ -94,9 +104,12 @@ def test_distributed_context_world_size_one_no_collectives():
     ctx.barrier()  # no-op
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="StepTrainer uses CUDA streams")
+def test_validation_config_defaults_to_yuv():
+    assert ValidationConfig().colorspace == "yuv"
+
+
 def test_step_trainer_runs_steps_and_validation(tmp_path):
-    device = torch.device("cuda:0")
+    device = torch.device("cpu")
     ctx = DistributedContext(rank=0, world_size=1, device=device)
     model = MobileOneSR(num_channels=8, num_blocks=1, scale=3).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)

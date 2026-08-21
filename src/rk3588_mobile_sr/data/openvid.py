@@ -6,11 +6,12 @@ import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-import numpy as np
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
+
+from rk3588_mobile_sr.data.decode import resolve_sequence_source
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,7 @@ def split_sequence_indices(
     return sorted(indices[val_count:]), sorted(indices[:val_count])
 
 
-def _crop_box(width: int, height: int, *, training: bool) -> tuple[int, int, int, int]:
+def crop_box(width: int, height: int, *, training: bool) -> tuple[int, int, int, int]:
     target_ratio = 16.0 / 9.0
     source_ratio = width / height
     if source_ratio > target_ratio:
@@ -94,13 +95,23 @@ def _crop_box(width: int, height: int, *, training: bool) -> tuple[int, int, int
     return left, top, left + crop_w, top + crop_h
 
 
-def _image_tensor(image: Image.Image) -> torch.Tensor:
-    array = np.asarray(image, dtype=np.uint8).copy()
-    return torch.from_numpy(array).permute(2, 0, 1).contiguous()
+def collate_openvid_batch(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    """Collate metadata samples without stacking variable-length path lists."""
+    batch: dict[str, Any] = {
+        "kind": [sample["kind"] for sample in samples],
+        "source": [sample["source"] for sample in samples],
+        "paths": [sample["paths"] for sample in samples],
+        "frame_indices": torch.stack([sample["frame_indices"] for sample in samples]),
+        "crop": torch.stack([sample["crop"] for sample in samples]),
+        "hflip": torch.stack([sample["hflip"] for sample in samples]),
+    }
+    if "q_index" in samples[0]:
+        batch["q_index"] = torch.stack([sample["q_index"] for sample in samples])
+    return batch
 
 
-class OpenVidSequenceDataset(Dataset[dict[str, torch.Tensor]]):
-    """Read consecutive OpenVidHD frames and form 640x360 MLVC inputs."""
+class OpenVidSequenceDataset(Dataset[dict[str, Any]]):
+    """Sample OpenVidHD clip metadata for GPU-side TorchCodec decoding."""
 
     def __init__(
         self,
@@ -141,7 +152,7 @@ class OpenVidSequenceDataset(Dataset[dict[str, torch.Tensor]]):
         multiplier = 1 if self.training_split else len(self.q_indices)
         return len(self.sequences) * multiplier
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, index: int) -> dict[str, Any]:
         if self.training_split:
             sequence = self.sequences[index % len(self.sequences)]
             q_index = None
@@ -152,36 +163,28 @@ class OpenVidSequenceDataset(Dataset[dict[str, torch.Tensor]]):
 
         max_start = len(sequence.frames) - self.sequence_frames
         start = random.randint(0, max_start) if self.augment and max_start else max_start // 2
-        names = list(sequence.frames[start : start + self.sequence_frames])
+        frame_indices = list(range(start, start + self.sequence_frames))
         if self.augment and random.random() < 0.5:
-            names.reverse()
+            frame_indices.reverse()
 
-        first_path = self.root / sequence.path / names[0]
-        with Image.open(first_path) as first:
-            size = first.size
-        crop = _crop_box(*size, training=self.augment)
-        flip = self.augment and random.random() < 0.5
-        lr_h, lr_w = self.lr_size
-        hr_h, hr_w = self.hr_size
+        kind, source = resolve_sequence_source(self.root, sequence.path)
+        if kind == "video":
+            paths: list[str] = []
+        else:
+            paths = [str(source / sequence.frames[frame_index]) for frame_index in frame_indices]
 
-        lr_frames: list[torch.Tensor] = []
-        hr_target: torch.Tensor | None = None
-        for frame_offset, name in enumerate(names):
-            frame_path = self.root / sequence.path / name
-            with Image.open(frame_path) as source:
-                image = source.convert("RGB").crop(crop)
-                if flip:
-                    image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                lr_image = image.resize((lr_w, lr_h), Image.Resampling.LANCZOS)
-                lr_frames.append(_image_tensor(lr_image))
-                if frame_offset == len(names) - 1:
-                    hr_image = image.resize((hr_w, hr_h), Image.Resampling.LANCZOS)
-                    hr_target = _image_tensor(hr_image)
-
-        assert hr_target is not None
-        sample = {
-            "lr_sequence": torch.stack(lr_frames, dim=0),
-            "hr": hr_target,
+        left, top, right, bottom = crop_box(
+            sequence.width,
+            sequence.height,
+            training=self.augment,
+        )
+        sample: dict[str, Any] = {
+            "kind": kind,
+            "source": str(source),
+            "paths": paths,
+            "frame_indices": torch.tensor(frame_indices, dtype=torch.long),
+            "crop": torch.tensor((left, top, right, bottom), dtype=torch.long),
+            "hflip": torch.tensor(self.augment and random.random() < 0.5),
         }
         if q_index is not None:
             sample["q_index"] = torch.tensor(q_index, dtype=torch.long)

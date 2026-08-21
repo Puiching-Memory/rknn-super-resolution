@@ -29,7 +29,7 @@
 1. **Step-based DDP**：循环在 `train/loop.py`；`train/unified.py` 只组装平台期驱动的
    FP32→QAT 状态机、hook 与配置，不另起一套训练循环。
 2. **rank 0 独占段**：日志、SwanLab、checkpoint、验证图像等只能在 collective **完成之后**、经 `distributed/sync.py` `rank0_section` 执行；禁止让非 0 rank 在 broadcast 前空等。
-3. **数据契约**：离线 codec cache + 在线 GPU 解码；分辨率与 deploy 对齐（LR 360×640 canvas，HR 1080×1920）。解码后端与 manifest 格式以 `data/train_loader.py`、`data/codec_index.py` 为准。
+3. **数据契约**：OpenVidHD `description.json` 索引；CPU 只产出 clip 元数据。TorchCodec 在训练 GPU 上解码（视频默认 NVDEC；序列目录内 `sequence.mp4` sidecar 优先于逐帧图像）。分辨率与 deploy 对齐（LR 360×640 canvas，HR 1080×1920）。解码与几何变换以 `data/decode.py`、`data/openvid.py`、`data/mlvc_loader.py` 为准。
 4. **色彩空间**：默认在 **YUV444** 张量上训练；RGB 仅用于可视化与部分指标，经 `data/yuv_utils.py` 转换。排查色差时先区分 codec/模型误差与 YUV 往返误差（见 `utils/swanlab_logging.py` data preview）。
 5. **部署图**：推理前 `switch_to_deploy()`；导出/量化逻辑在 `deploy/`，不与训练循环缠在一起。
 
@@ -37,7 +37,7 @@
 
 - `torchrun` 须用 **`-m rk3588_mobile_sr.train.unified`**，不能把 console script 名当文件路径。
 - 勿 `export SWANLAB_EXPERIMENT`（SDK 会误解析）；用 `--swanlab_experiment`。`scripts/_common.sh` 已处理 `NO_PROXY` 等环境。
-- NVDEC 不可用时 `decode` 降级 TorchCodec，不是代码 bug，先查驱动 capabilities。
+- CUDA `VideoDecoder` 默认走 NVDEC；codec 不受支持或 NVCUVID 缺失时 TorchCodec 会 CPU fallback，不是代码 bug，先查驱动 capabilities。
 
 ## SwanLab
 

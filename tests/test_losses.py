@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from rk3588_mobile_sr.losses import CharbonnierLoss, DCTLoss
+from rk3588_mobile_sr.losses import CharbonnierLoss, DCTLoss, DISTSLoss
+from rk3588_mobile_sr.utils.pyiqa_metric import PyIQAPerceptualLoss
 
 
 def test_charbonnier_loss_positive():
@@ -36,3 +37,9 @@ def test_dct_loss_shape_and_sign():
     assert loss.dim() == 0
     assert torch.isfinite(loss)
     assert loss.item() >= 0.0
+
+
+def test_dists_loss_is_pyiqa_wrapper_without_loading_weights():
+    assert DISTSLoss is PyIQAPerceptualLoss
+    criterion = DISTSLoss()
+    assert criterion.metric == "dists"

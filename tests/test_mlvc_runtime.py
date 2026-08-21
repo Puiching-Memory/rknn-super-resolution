@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from threading import Lock
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -29,11 +30,32 @@ class _FakeMLVC(nn.Module):
 
 
 def test_mlvc_small_config_matches_public_checkpoint():
-    config = mlvc_model_config("small")
-    assert config["type"] == "DMC-6.1sb"
-    assert config["feature_channels"] == 48
-    assert config["y_channels"] == 48
-    assert config["hyperprior_variant"] == "mini"
+    assert mlvc_model_config("small") == {
+        "type": "DMC-6.1sb",
+        "activation": "LeakyReLU",
+        "input_offset": -0.5,
+        "memory_activation": "identity",
+        "zero_init_residual": True,
+        "chunk_mode": "gated",
+        "ffn_gate_activation": "ReLU1",
+        "chain_feature_adaptors": True,
+        "feature_channels": 48,
+        "spatial_prior_channels": 128,
+        "recon_channels": 192,
+        "hidden_channels": 192,
+        "hyperprior_num_blocks": 2,
+        "y_scale_repeat": 4,
+        "z_channels": 48,
+        "y_channels": 48,
+        "hyperprior_variant": "mini",
+        "feature_extractor_num_conv1_layers": 1,
+        "feature_extractor_num_conv2_layers": 1,
+    }
+
+
+def test_mlvc_model_config_rejects_unknown_variant():
+    with pytest.raises(ValueError, match="unsupported MLVC variant"):
+        mlvc_model_config("tiny")
 
 
 def test_runtime_pads_360_to_368_and_crops_output():

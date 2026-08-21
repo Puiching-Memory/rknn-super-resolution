@@ -121,11 +121,24 @@ def ssim_rgb(
     )
 
 
+def _module_device(module: nn.Module, rank: int) -> torch.device:
+    for tensor in module.parameters():
+        return tensor.device
+    for tensor in module.buffers():
+        return tensor.device
+    if torch.cuda.is_available():
+        return torch.device(f"cuda:{rank}")
+    return torch.device("cpu")
+
+
 def _rank_sample_indices(val_loader: DataLoader | object) -> list[int]:
-    sampler = val_loader.sampler
+    sampler = getattr(val_loader, "sampler", None)
     if isinstance(sampler, DistributedSampler):
         return list(sampler)
-    return list(range(len(val_loader.dataset)))
+    dataset = getattr(val_loader, "dataset", None)
+    if dataset is not None:
+        return list(range(len(dataset)))
+    return list(range(len(val_loader)))
 
 
 def _aggregate_per_sample(
@@ -179,7 +192,7 @@ def validate_ddp_extended(
     compute_vmaf: bool = True,
     vmaf_model: str = "1080p",
     vmaf_enc_size: tuple[int, int] | None = (360, 640),
-    colorspace: str = "rgb",
+    colorspace: str = "yuv",
 ) -> tuple[float, ValidationMetrics | None]:
     """Run full validation; primary score is VMAF when enabled, else PSNR."""
     from rk3588_mobile_sr.utils.pyiqa_metric import batch_perceptual_metric
@@ -192,7 +205,7 @@ def validate_ddp_extended(
     was_training = unwrap.training
     unwrap.eval()
 
-    device = torch.device(f"cuda:{rank}")
+    device = _module_device(unwrap, rank)
     shave = scale
     sample_indices = _rank_sample_indices(val_loader)
     local_records: list[tuple[int, float, float, float, float, float, float]] = []
@@ -316,6 +329,7 @@ def validate_ddp(
     world_size: int,
     *,
     scale: int = 3,
+    colorspace: str = "yuv",
 ) -> float:
     """Evaluate mean primary val score (VMAF by default) on the validation set."""
     score, _ = validate_ddp_extended(
@@ -324,5 +338,6 @@ def validate_ddp(
         rank,
         world_size,
         scale=scale,
+        colorspace=colorspace,
     )
     return score

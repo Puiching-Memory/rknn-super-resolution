@@ -308,7 +308,7 @@ def build_loaders(
     rank: int | None = None,
     world_size: int | None = None,
 ) -> tuple[MLVCTrainLoader, None, DataLoader | object]:
-    """Build OpenVidHD loaders with a shared frozen MLVC runtime."""
+    """Build OpenVidHD loaders with TorchCodec GPU decode and a frozen MLVC runtime."""
     if distributed and dist.is_initialized():
         rank = dist.get_rank() if rank is None else rank
     else:

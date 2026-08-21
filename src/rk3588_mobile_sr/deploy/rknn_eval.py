@@ -50,6 +50,7 @@ class AccuracyReport:
     match_psnr: float
     match_psnr_min: float
     quant_mode: str
+    scale: int = 3
 
     @property
     def psnr_drop(self) -> float | None:
@@ -352,12 +353,13 @@ def evaluate_accuracy(
         match_psnr=float(match_arr.mean()) if match_psnrs else float("nan"),
         match_psnr_min=float(match_arr.min()) if match_psnrs else float("nan"),
         quant_mode=quant_mode,
+        scale=scale,
     )
 
 
 def format_accuracy_table(report: AccuracyReport) -> str:
-    hr_h = report.input_h * 3
-    hr_w = report.input_w * 3
+    hr_h = report.input_h * report.scale
+    hr_w = report.input_w * report.scale
     header = (
         f"=== RKNN accuracy ({report.num_images} images, "
         f"LR {report.input_h}x{report.input_w} -> HR {hr_h}x{hr_w}) ==="

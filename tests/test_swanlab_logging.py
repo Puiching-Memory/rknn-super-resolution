@@ -94,8 +94,8 @@ def test_save_sr_panels_writes_png(tmp_path: Path):
 def test_find_swanlab_run_id_prefers_earliest_matching_experiment(tmp_path: Path):
     swanlog = tmp_path / "swanlog"
     for stamp, run_id, experiment in [
-        ("20260703_160900", "sx4e2ajn", "stage1-8gpu-20260703-1608"),
-        ("20260703_170951", "732xjcw5", "stage1-8gpu-20260703-1608"),
+        ("20260821_160900", "sx4e2ajn", "train-8gpu-20260821-1608"),
+        ("20260821_170951", "732xjcw5", "train-8gpu-20260821-1608"),
     ]:
         run_dir = swanlog / f"run-{stamp}-{run_id}"
         files = run_dir / "files"
@@ -108,7 +108,7 @@ def test_find_swanlab_run_id_prefers_earliest_matching_experiment(tmp_path: Path
         (files / "swanlab-metadata.json").write_text(json.dumps(meta), encoding="utf-8")
 
     assert (
-        find_swanlab_run_id(tmp_path, "stage1-8gpu-20260703-1608") == "sx4e2ajn"
+        find_swanlab_run_id(tmp_path, "train-8gpu-20260821-1608") == "sx4e2ajn"
     )
 
 
@@ -117,7 +117,7 @@ def test_save_and_load_swanlab_run_record(tmp_path: Path):
         tmp_path,
         run_id="gjid8vrb1jigurxquwabt",
         project="rk3588-mobile-sr",
-        experiment_name="stage1-8gpu-20260703-1608",
+        experiment_name="train-8gpu-20260821-1608",
     )
     record = load_swanlab_run_record(tmp_path)
     assert record is not None
@@ -135,7 +135,7 @@ def test_resolve_swanlab_run_id_uses_cloud_lookup_for_local_suffix(tmp_path: Pat
         tmp_path,
         run_id="sx4e2ajn",
         project="rk3588-mobile-sr",
-        experiment_name="stage1-8gpu-20260703-1608",
+        experiment_name="train-8gpu-20260821-1608",
     )
     monkeypatch.setattr(
         "rk3588_mobile_sr.utils.swanlab_logging.lookup_swanlab_cloud_run_id",
@@ -144,7 +144,7 @@ def test_resolve_swanlab_run_id_uses_cloud_lookup_for_local_suffix(tmp_path: Pat
     run_id = resolve_swanlab_run_id(
         save_dir=tmp_path,
         project="rk3588-mobile-sr",
-        experiment_name="stage1-8gpu-20260703-1608",
+        experiment_name="train-8gpu-20260821-1608",
         resume_checkpoint="dummy.pth",
     )
     assert run_id == "gjid8vrb1jigurxquwabt"

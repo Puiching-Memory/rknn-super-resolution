@@ -5,16 +5,18 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import torch
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 from rk3588_mobile_sr.config import DataConfig
+from rk3588_mobile_sr.data.decode import FrameDecoder, TorchCodecFrameDecoder
 from rk3588_mobile_sr.data.mlvc_runtime import FrozenMLVCRuntime
 from rk3588_mobile_sr.data.openvid import (
     OpenVidSequenceDataset,
+    collate_openvid_batch,
     load_openvid_description,
     split_sequence_indices,
 )
@@ -47,6 +49,7 @@ class MLVCBatchProcessor:
         self,
         runtime: MLVCRuntime,
         *,
+        decoder: FrameDecoder,
         device: torch.device,
         q_indices: tuple[int, ...],
         colorspace: str,
@@ -58,6 +61,7 @@ class MLVCBatchProcessor:
         if colorspace not in ("rgb", "yuv"):
             raise ValueError("colorspace must be 'rgb' or 'yuv'")
         self.runtime = runtime
+        self.decoder = decoder
         self.device = device
         self.q_indices = q_indices
         self.colorspace = colorspace
@@ -66,12 +70,13 @@ class MLVCBatchProcessor:
 
     def __call__(
         self,
-        batch: dict[str, torch.Tensor],
+        batch: dict[str, Any],
         *,
         training: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        sequence = batch["lr_sequence"].to(self.device, non_blocking=True).float().div_(255.0)
-        hr_rgb = batch["hr"].to(self.device, non_blocking=True).float().div_(255.0)
+        sequence_u8, hr_u8 = self.decoder.decode_batch(batch)
+        sequence = sequence_u8.to(self.device, non_blocking=True).float().div_(255.0)
+        hr_rgb = hr_u8.to(self.device, non_blocking=True).float().div_(255.0)
         b, t, c, h, w = sequence.shape
         sequence_yuv = rgb_to_mlvc_ycbcr(sequence.reshape(b * t, c, h, w)).reshape(
             b, t, c, h, w
@@ -182,12 +187,15 @@ class _InfiniteMLVCIterator(Iterator[MLVCDeviceBatch]):
 @dataclass
 class MLVCTrainLoader:
     dataloader: _InfiniteMLVCIterator
+    decoder: FrameDecoder | None = None
 
     def __iter__(self) -> Iterator[MLVCDeviceBatch]:
         return iter(self.dataloader)
 
     def close(self) -> None:
         self.dataloader.close()
+        if self.decoder is not None:
+            self.decoder.close()
 
 
 class MLVCValidationLoader:
@@ -270,6 +278,7 @@ def build_mlvc_loaders(
         "num_workers": data.num_workers,
         "pin_memory": True,
         "persistent_workers": data.num_workers > 0,
+        "collate_fn": collate_openvid_batch,
     }
     train_cpu_loader = DataLoader(
         train_dataset,
@@ -299,8 +308,14 @@ def build_mlvc_loaders(
         device=device,
         amp=data.mlvc_amp,
     )
+    decoder = TorchCodecFrameDecoder(
+        device,
+        lr_size=data.lr_size,
+        hr_size=data.hr_size,
+    )
     train_processor = MLVCBatchProcessor(
         runtime,
+        decoder=decoder,
         device=device,
         q_indices=data.q_indices,
         colorspace=colorspace,
@@ -309,6 +324,7 @@ def build_mlvc_loaders(
     )
     val_processor = MLVCBatchProcessor(
         runtime,
+        decoder=decoder,
         device=device,
         q_indices=data.q_indices,
         colorspace=colorspace,
@@ -316,4 +332,7 @@ def build_mlvc_loaders(
         scale=scale,
     )
     train_iterator = _InfiniteMLVCIterator(train_cpu_loader, train_processor, train_sampler)
-    return MLVCTrainLoader(train_iterator), MLVCValidationLoader(val_cpu_loader, val_processor)
+    return (
+        MLVCTrainLoader(train_iterator, decoder),
+        MLVCValidationLoader(val_cpu_loader, val_processor),
+    )
