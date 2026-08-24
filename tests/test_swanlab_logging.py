@@ -39,14 +39,37 @@ def test_resolve_colorspace_from_yaml():
     assert resolve_colorspace(args) == "yuv"
 
 
-def test_make_sr_panel_uses_nearest_lr_upscale():
+def test_make_sr_panel_uses_bicubic_lr_baseline():
     lr = torch.zeros(3, 12, 12)
     lr[:, 0::3, 0::3] = 255.0
     sr = torch.zeros(3, 36, 36)
     hr = torch.zeros(3, 36, 36)
     panel = make_sr_panel(lr, sr, hr, include_detail=False)
     assert panel.shape == (36, 36 * 3, 3)
-    assert panel[:, :36, 0].max() == 255
+    expected = torch.nn.functional.interpolate(
+        lr.unsqueeze(0),
+        size=(36, 36),
+        mode="bicubic",
+        align_corners=False,
+    )[0].clamp(0.0, 255.0)
+    expected = expected.permute(1, 2, 0).numpy().astype(np.uint8)
+    np.testing.assert_array_equal(panel[:, :36], expected)
+
+
+def test_make_sr_panel_attributes_improvement_and_regression():
+    lr = torch.zeros(3, 40, 40)
+    hr = torch.full((3, 120, 120), 100.0)
+
+    improved = make_sr_panel(lr, hr, hr)
+    improved_effect = improved[120:240, 240:360]
+    assert improved_effect[80:, :, 1].max() > 0
+    assert improved_effect[80:, :, 0].max() == 0
+
+    baseline = hr.clone()
+    regressed = make_sr_panel(lr, torch.zeros_like(hr), hr, baseline=baseline)
+    regressed_effect = regressed[120:240, 240:360]
+    assert regressed_effect[80:, :, 0].max() > 0
+    assert regressed_effect[80:, :, 1].max() == 0
 
 
 def test_make_data_preview_panel_includes_roundtrip_column():

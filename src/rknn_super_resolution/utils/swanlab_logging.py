@@ -379,6 +379,27 @@ def _abs_diff_heatmap(
     return _grayscale_to_heat_hwc(np.clip(diff * gain, 0.0, 255.0).astype(np.uint8))
 
 
+def _sr_effect_heatmap(
+    baseline_hwc: np.ndarray,
+    sr_hwc: np.ndarray,
+    hr_hwc: np.ndarray,
+    *,
+    gain: float = 8.0,
+) -> np.ndarray:
+    """Show SR's incremental effect over the pre-SR baseline.
+
+    Green means SR reduced mean-channel absolute error; red means it increased
+    error. Black means SR had little effect on the baseline error.
+    """
+    baseline_error = _mean_abs_diff_map(baseline_hwc, hr_hwc)
+    sr_error = _mean_abs_diff_map(sr_hwc, hr_hwc)
+    improvement = (baseline_error - sr_error) * gain
+    effect = np.zeros((*improvement.shape, 3), dtype=np.float32)
+    effect[..., 0] = np.clip(-improvement, 0.0, 255.0)
+    effect[..., 1] = np.clip(improvement, 0.0, 255.0)
+    return effect.astype(np.uint8)
+
+
 def _mean_abs_diff_map(a_hwc: np.ndarray, b_hwc: np.ndarray) -> np.ndarray:
     return np.abs(a_hwc.astype(np.float32) - b_hwc.astype(np.float32)).mean(axis=-1)
 
@@ -453,6 +474,31 @@ def _paste_zoom_in_column(
     return slot
 
 
+def _label_tile(tile: np.ndarray, label: str) -> np.ndarray:
+    """Burn a readable label into a visualization tile."""
+    if min(tile.shape[:2]) < 256:
+        return tile
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    image = Image.fromarray(tile.copy())
+    draw = ImageDraw.Draw(image)
+    # SwanLab normally scales the full three-column panel to 768 px wide.
+    # A relatively large source font remains legible in that thumbnail.
+    font_size = max(14, min(tile.shape[:2]) // 12)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+    left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+    pad = max(4, font_size // 5)
+    box_w = right - left + 2 * pad
+    box_h = bottom - top + 2 * pad
+    draw.rectangle((0, 0, box_w, box_h), fill=(16, 16, 16))
+    draw.text((pad - left, pad - top), label, fill=(255, 255, 255), font=font)
+    return np.asarray(image)
+
+
 def upscale_lr_canvas(lr: torch.Tensor, hr_hw: tuple[int, int]) -> torch.Tensor:
     """Upscale MLVC LR to HR size for side-by-side visualization."""
     return F.interpolate(
@@ -462,45 +508,105 @@ def upscale_lr_canvas(lr: torch.Tensor, hr_hw: tuple[int, int]) -> torch.Tensor:
     )[0]
 
 
+def bicubic_lr_canvas(lr: torch.Tensor, hr_hw: tuple[int, int]) -> torch.Tensor:
+    """Build the same bicubic pre-SR baseline used by Phase-RLFN."""
+    if lr.ndim not in (3, 4):
+        raise ValueError(f"expected CHW or BCHW LR tensor, got shape {tuple(lr.shape)}")
+    squeeze = lr.ndim == 3
+    batch = lr.unsqueeze(0) if squeeze else lr
+    output = F.interpolate(
+        batch,
+        size=hr_hw,
+        mode="bicubic",
+        align_corners=False,
+    ).clamp(0.0, 255.0)
+    return output[0] if squeeze else output
+
+
 def make_sr_panel(
     lr: torch.Tensor,
     sr: torch.Tensor,
     hr: torch.Tensor,
     *,
+    baseline: torch.Tensor | None = None,
     error_gain: float = 8.0,
     zoom_fraction: float = 0.25,
     zoom_scale: int = 4,
     include_detail: bool = True,
 ) -> np.ndarray:
-    """Build an MLVC LR | Phase-RLFN | HR panel with an optional error row."""
+    """Build an attribution panel separating upstream and SR-induced error."""
     hr_hw = hr.shape[-2:]
-    lr_up = upscale_lr_canvas(lr, hr_hw)
-    lr_np = chw_tensor_to_uint8_hwc(lr_up)
+    if baseline is None:
+        baseline = bicubic_lr_canvas(lr, hr_hw)
+    baseline_np = chw_tensor_to_uint8_hwc(baseline)
     sr_np = chw_tensor_to_uint8_hwc(sr)
     hr_np = chw_tensor_to_uint8_hwc(hr)
 
-    top = np.concatenate([lr_np, sr_np, hr_np], axis=1)
+    top = np.concatenate(
+        [
+            _label_tile(baseline_np, "PRE-SR: MLVC + BICUBIC"),
+            _label_tile(sr_np, "SR OUTPUT"),
+            _label_tile(hr_np, "HR TARGET"),
+        ],
+        axis=1,
+    )
     if not include_detail:
         return top
 
-    err_lr = _abs_diff_heatmap(lr_np, hr_np, gain=error_gain)
+    err_baseline = _abs_diff_heatmap(baseline_np, hr_np, gain=error_gain)
     err_sr = _abs_diff_heatmap(sr_np, hr_np, gain=error_gain)
-    col_w = lr_np.shape[1]
-    row_h = err_lr.shape[0]
-    zoom_sr_hr = _paste_zoom_in_column(
-        _crop_zoom_pair(
-            sr_np,
-            hr_np,
-            fraction=zoom_fraction,
-            scale=zoom_scale,
-            target_width=col_w,
-            crop_box=_max_error_crop_box(sr_np, hr_np, fraction=zoom_fraction),
-        ),
-        col_w=col_w,
-        row_h=row_h,
+    sr_effect = _sr_effect_heatmap(
+        baseline_np,
+        sr_np,
+        hr_np,
+        gain=error_gain,
     )
-    bottom = np.concatenate([err_lr, err_sr, zoom_sr_hr], axis=1)
-    return np.concatenate([top, bottom], axis=0)
+    attribution = np.concatenate(
+        [
+            _label_tile(err_baseline, "ERROR BEFORE SR"),
+            _label_tile(err_sr, "ERROR AFTER SR"),
+            _label_tile(sr_effect, "SR EFFECT: GREEN + / RED -"),
+        ],
+        axis=1,
+    )
+
+    # Use one shared crop where SR changes the baseline error most. Comparing
+    # different crops would make attribution ambiguous.
+    baseline_error = _mean_abs_diff_map(baseline_np, hr_np)
+    sr_error = _mean_abs_diff_map(sr_np, hr_np)
+    crop_box = _best_patch_crop_box(
+        np.abs(baseline_error - sr_error),
+        fraction=zoom_fraction,
+    )
+    col_w = baseline_np.shape[1]
+    row_h = baseline_np.shape[0]
+
+    def _zoom_slot(a: np.ndarray, b: np.ndarray, label: str) -> np.ndarray:
+        return _label_tile(
+            _paste_zoom_in_column(
+                _crop_zoom_pair(
+                    a,
+                    b,
+                    fraction=zoom_fraction,
+                    scale=zoom_scale,
+                    target_width=col_w,
+                    crop_box=crop_box,
+                ),
+                col_w=col_w,
+                row_h=row_h,
+            ),
+            label,
+        )
+
+    zoom = np.concatenate(
+        [
+            _zoom_slot(baseline_np, hr_np, "ZOOM: PRE-SR | HR"),
+            _zoom_slot(sr_np, hr_np, "ZOOM: SR | HR"),
+            _zoom_slot(baseline_np, sr_np, "ZOOM: PRE-SR | SR"),
+        ],
+        axis=1,
+    )
+    return np.concatenate([top, attribution, zoom], axis=0)
 
 
 def rgb_diff_stats(a_hwc: np.ndarray, b_hwc: np.ndarray) -> dict[str, float]:
@@ -722,9 +828,16 @@ def collect_sr_validation_panels(
         else:
             model_input = lr
         hr = hr.to(device, non_blocking=True)
+        bicubic_base = getattr(unwrap, "bicubic_base", None)
+        baseline = (
+            bicubic_base(lr)
+            if callable(bicubic_base)
+            else bicubic_lr_canvas(lr, hr.shape[-2:])
+        )
         sr = torch.clamp(forward_sr(unwrap, model_input), 0.0, 255.0)
         for i in range(lr.shape[0]):
             lr_rgb = colorspace_to_rgb(lr[i, :3], colorspace)
+            baseline_rgb = colorspace_to_rgb(baseline[i], colorspace)
             sr_rgb = colorspace_to_rgb(sr[i], colorspace)
             hr_rgb = colorspace_to_rgb(hr[i], colorspace)
             panels.append(
@@ -732,6 +845,7 @@ def collect_sr_validation_panels(
                     lr_rgb,
                     sr_rgb,
                     hr_rgb,
+                    baseline=baseline_rgb,
                     error_gain=error_gain,
                     include_detail=include_detail,
                 )
@@ -752,7 +866,7 @@ def save_sr_panels(
     *,
     subdir: str = "sr_preview",
 ) -> Path:
-    """Write MLVC LR | SR | HR panels under ``save_dir/subdir``."""
+    """Write pre-SR/SR/HR attribution panels under ``save_dir/subdir``."""
     preview_dir = Path(save_dir) / subdir
     for index, panel in enumerate(panels):
         _save_preview_png(panel, preview_dir / f"sample_{index:03d}.png")
@@ -779,9 +893,14 @@ def log_sr_panels(
     if not _active or not panels:
         return preview_dir
 
-    detail_note = "\nerr(MLVC LR↑) | err(SR) | zoom(SR|HR)@max-error" if include_detail else ""
+    detail_note = (
+        "\nerror before SR | error after SR | SR effect (green=better, red=worse)"
+        "\nzoom(pre-SR|HR) | zoom(SR|HR) | zoom(pre-SR|SR) @ max SR impact"
+        if include_detail
+        else ""
+    )
     space = f" [{colorspace}]" if colorspace else ""
-    caption = f"MLVC LR (NN x3) | Phase-RLFN | HR{space}{detail_note}"
+    caption = f"pre-SR MLVC+bicubic | Phase-RLFN | HR{space}{detail_note}"
 
     payload: dict[str, Any] = {}
     for i, panel in enumerate(panels):
