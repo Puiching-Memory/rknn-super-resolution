@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from rknn_super_resolution.data.yuv_utils import colorspace_roundtrip_rgb
 from rknn_super_resolution.models import SRInput, forward_sr, split_sr_input
 from rknn_super_resolution.utils.run_logger import logger
-from rknn_super_resolution.utils.sr_metrics import iter_val_batches
+from rknn_super_resolution.utils.sr_metrics import iter_val_batches, ssim_rgb
 
 _active = False
 _run_id: str | None = None
@@ -542,10 +542,21 @@ def make_sr_panel(
     sr_np = chw_tensor_to_uint8_hwc(sr)
     hr_np = chw_tensor_to_uint8_hwc(hr)
 
+    baseline_psnr = rgb_diff_stats(baseline_np, hr_np)["psnr"]
+    sr_psnr = rgb_diff_stats(sr_np, hr_np)["psnr"]
+    baseline_ssim = ssim_rgb(baseline_np, hr_np)
+    sr_ssim = ssim_rgb(sr_np, hr_np)
+
     top = np.concatenate(
         [
-            _label_tile(baseline_np, "PRE-SR: MLVC + BICUBIC"),
-            _label_tile(sr_np, "SR OUTPUT"),
+            _label_tile(
+                baseline_np,
+                f"BICUBIC {baseline_psnr:.2f}dB SSIM {baseline_ssim:.4f}",
+            ),
+            _label_tile(
+                sr_np,
+                f"SR {sr_psnr:.2f}dB (+{sr_psnr - baseline_psnr:.2f}) SSIM {sr_ssim:.4f}",
+            ),
             _label_tile(hr_np, "HR TARGET"),
         ],
         axis=1,

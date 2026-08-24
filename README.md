@@ -1,5 +1,7 @@
 # Rockchip RKNN MLVC + Phase-RLFN 视频超分辨率
 
+![SR 效果预览：Bicubic / Phase-RLFN SR / HR 参考及误差热图对比](docs/assets/sr_preview_grid.webp)
+
 已在 RK3576、RK3588 和 RV1126B 上测试的 3× 视频超分辨率训练与部署工程。训练数据来自冻结
 MLVC-S 的真实 P-frame 量化重建，而不是普通 bicubic 或传统视频解码帧。
 
