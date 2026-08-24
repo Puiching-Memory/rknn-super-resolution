@@ -23,7 +23,7 @@ jobs:
         run: uv python install 3.13
 
       - name: Install libvmaf system dependencies
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends nasm xxd
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends nasm xxd fonts-noto-cjk fonts-wqy-zenhei
 
       - name: Install dependencies
         run: uv sync
