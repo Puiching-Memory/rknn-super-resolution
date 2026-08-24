@@ -1,7 +1,6 @@
 """Tests for RKNN dedicated Python resolution."""
 
 from rknn_super_resolution.deploy.rknn_env import (
-    LEGACY_RKNN_PYTHON_ENVS,
     RKNN_PYTHON_ENV,
     _project_root,
     _resolve_python_path,
@@ -23,8 +22,6 @@ def test_resolve_rknn_python_relative_to_project_root():
 
 def test_resolve_rknn_python_from_config(monkeypatch):
     monkeypatch.delenv(RKNN_PYTHON_ENV, raising=False)
-    for env_name in LEGACY_RKNN_PYTHON_ENVS:
-        monkeypatch.delenv(env_name, raising=False)
     path = resolve_rknn_python(None)
     assert path == (_project_root() / ".venv-rknn/bin/python").absolute()
 
@@ -42,10 +39,4 @@ def test_needs_rknn_reexec_distinguishes_uv_venvs(monkeypatch):
 
 def test_resolve_rknn_python_env_overrides_config(monkeypatch):
     monkeypatch.setenv(RKNN_PYTHON_ENV, ".venv-rknn/bin/python")
-    assert resolve_rknn_python(None) == resolve_rknn_python(".venv-rknn/bin/python")
-
-
-def test_resolve_rknn_python_supports_legacy_board_env(monkeypatch):
-    monkeypatch.delenv(RKNN_PYTHON_ENV, raising=False)
-    monkeypatch.setenv("RK3588_RKNN_PYTHON", ".venv-rknn/bin/python")
     assert resolve_rknn_python(None) == resolve_rknn_python(".venv-rknn/bin/python")

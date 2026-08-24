@@ -261,7 +261,8 @@ def _checkpoint(
 
 def _load_raw(path: str | Path, device: torch.device) -> dict:
     raw = torch.load(path, map_location=device, weights_only=False)
-    if not isinstance(raw, dict) or "state_dict" not in raw or "phase" not in raw:
+    required = {"phase", "step", "state_dict", "optimizer"}
+    if not isinstance(raw, dict) or not required.issubset(raw):
         raise TypeError(f"Expected a unified training checkpoint in {path}")
     return raw
 
@@ -278,22 +279,20 @@ def _restore(
 ) -> int:
     load_training_module_state_dict(model, raw["state_dict"])
     optimizer.load_state_dict(raw["optimizer"])
-    if ema_model is not None and "ema_state_dict" in raw:
+    if ema_model is not None:
         ema_model.load_state_dict(raw["ema_state_dict"], strict=True)
-    if train_accel is not None and train_accel.scaler is not None and "scaler" in raw:
+    if train_accel is not None and train_accel.scaler is not None:
         train_accel.scaler.load_state_dict(raw["scaler"])
     if early_stop is not None:
-        saved_early_stop = raw.get("early_stop", {})
-        early_stop.best_score = float(saved_early_stop.get("best_score", -1.0))
-        early_stop.plateau_score = float(
-            saved_early_stop.get("plateau_score", early_stop.best_score)
-        )
-        early_stop.patience_counter = int(saved_early_stop.get("patience_counter", 0))
-        early_stop.evaluations = int(saved_early_stop.get("evaluations", 0))
-        early_stop.psnr_at_best = float(saved_early_stop.get("psnr_at_best", -1.0))
-    if lr_scheduler is not None and "lr_scheduler" in raw:
+        saved_early_stop = raw["early_stop"]
+        early_stop.best_score = float(saved_early_stop["best_score"])
+        early_stop.plateau_score = float(saved_early_stop["plateau_score"])
+        early_stop.patience_counter = int(saved_early_stop["patience_counter"])
+        early_stop.evaluations = int(saved_early_stop["evaluations"])
+        early_stop.psnr_at_best = float(saved_early_stop["psnr_at_best"])
+    if lr_scheduler is not None:
         lr_scheduler.load_state_dict(raw["lr_scheduler"])
-    return int(raw.get("step", 0))
+    return int(raw["step"])
 
 
 def _weight_clip(model: nn.Module, clip_min: float, clip_max: float) -> None:
@@ -421,7 +420,7 @@ def main() -> None:
     with distributed_session() as ctx:
         if args.resume:
             resume_raw = _load_raw(args.resume, ctx.device)
-        resume_phase = str(resume_raw.get("phase", FLOAT)) if resume_raw else FLOAT
+        resume_phase = str(resume_raw["phase"]) if resume_raw else FLOAT
         if resume_phase not in {FLOAT, QAT_OBSERVE, QAT_STABLE}:
             raise ValueError(f"Unknown checkpoint phase: {resume_phase}")
 

@@ -130,8 +130,7 @@ uv run rknn-super-resolution convert-rknn \
 同一个 ONNX 应针对每种目标板卡分别编译，并使用不同的 `--output` 保存产物，例如
 `phase_rlfn_sr_x3_rk3576.rknn`、`phase_rlfn_sr_x3_rk3588.rknn` 与
 `phase_rlfn_sr_x3_rv1126b.rknn`。RKNN 专用解释器可通过
-通用环境变量 `RKNN_PYTHON` 覆盖；旧的 `RK3576_RKNN_PYTHON` 和
-`RK3588_RKNN_PYTHON` 仍兼容。
+环境变量 `RKNN_PYTHON` 覆盖。
 
 ## 分布式不变量
 

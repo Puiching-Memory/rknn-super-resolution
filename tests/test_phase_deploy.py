@@ -3,6 +3,7 @@
 from argparse import Namespace
 
 import numpy as np
+import pytest
 import torch
 
 from rknn_super_resolution.config import load_config
@@ -49,6 +50,13 @@ def test_rknn_cli_accepts_tested_and_unlisted_boards() -> None:
     assert parse_args(["--onnx", "model.onnx", "--target", "RK3588"]).target == "rk3588"
     assert parse_args(["--onnx", "model.onnx", "--target", "RV1126B"]).target == "rv1126b"
     assert parse_args(["--onnx", "model.onnx", "--target", "RK9999"]).target == "rk9999"
+
+
+def test_rknn_cli_rejects_removed_eval_directory_aliases() -> None:
+    with pytest.raises(SystemExit):
+        parse_args(["--onnx", "model.onnx", "--eval_hr_dir", "hr"])
+    with pytest.raises(SystemExit):
+        parse_args(["--onnx", "model.onnx", "--eval_lr_dir", "lr"])
 
 
 def test_onnx_wrappers_match_core_contracts() -> None:

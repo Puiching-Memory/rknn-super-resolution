@@ -51,15 +51,6 @@ class EarlyStopState:
     patience_counter: int = 0
     evaluations: int = 0
 
-    # Backward-compatible alias used by older tests / logs.
-    @property
-    def best_psnr(self) -> float:
-        return self.best_score
-
-    @best_psnr.setter
-    def best_psnr(self, value: float) -> None:
-        self.best_score = value
-
     def update(self, score: float) -> tuple[bool, bool]:
         """Return (improved, should_stop). Higher score is better (VMAF / PSNR)."""
         self.evaluations += 1
@@ -112,11 +103,6 @@ class ValidationResult:
     improved: bool
     should_stop: bool
     metrics: dict[str, float] = field(default_factory=dict)
-
-    @property
-    def psnr(self) -> float:
-        """Legacy alias: primary score (VMAF when enabled)."""
-        return self.score
 
 
 @dataclass

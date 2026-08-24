@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 RKNN_PYTHON_ENV = "RKNN_PYTHON"
-LEGACY_RKNN_PYTHON_ENVS = ("RK3576_RKNN_PYTHON", "RK3588_RKNN_PYTHON")
 DEFAULT_RKNN_PYTHON = ".venv-rknn/bin/python"
 
 
@@ -45,9 +44,6 @@ def resolve_rknn_python(explicit: str | None = None) -> Path:
     env = os.environ.get(RKNN_PYTHON_ENV)
     if env:
         return _resolve_python_path(env)
-    for legacy_env in LEGACY_RKNN_PYTHON_ENVS:
-        if env := os.environ.get(legacy_env):
-            return _resolve_python_path(env)
     return _resolve_python_path(_default_rknn_python_raw())
 
 

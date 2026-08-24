@@ -110,7 +110,11 @@ def _merge_dataclass(cls: type, data: dict[str, Any] | None) -> Any:
     if not data:
         return cls()
     valid = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-    kwargs = {k: v for k, v in data.items() if k in valid}
+    unknown = set(data) - valid
+    if unknown:
+        names = ", ".join(sorted(unknown))
+        raise ValueError(f"unknown {cls.__name__} field(s): {names}")
+    kwargs = dict(data)
     if cls is DataConfig and "lr_size" in kwargs:
         kwargs["lr_size"] = tuple(kwargs["lr_size"])
     if cls is DataConfig and "hr_size" in kwargs:
@@ -133,6 +137,12 @@ def load_config(path: Path | str | None = None) -> AppConfig:
         with Path(path).open(encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
 
+    sections = {"model", "data", "training", "deploy"}
+    unknown_sections = set(raw) - sections
+    if unknown_sections:
+        names = ", ".join(sorted(unknown_sections))
+        raise ValueError(f"unknown config section(s): {names}")
+
     return AppConfig(
         model=_merge_dataclass(ModelConfig, raw.get("model")),
         data=_merge_dataclass(DataConfig, raw.get("data")),
@@ -143,4 +153,6 @@ def load_config(path: Path | str | None = None) -> AppConfig:
 
 def default_config_path() -> Path:
     """Return the path to the bundled default config file."""
-    return Path(str(resources.files("rknn_super_resolution.config").joinpath("phase_rlfn_sr_x3.yaml")))
+    return Path(
+        str(resources.files("rknn_super_resolution.config").joinpath("phase_rlfn_sr_x3.yaml"))
+    )

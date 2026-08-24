@@ -61,14 +61,6 @@ def test_early_stop_improves_resets_patience():
     assert state.patience_counter == 0
 
 
-def test_early_stop_best_psnr_alias_tracks_score():
-    state = EarlyStopState(enabled=True, patience=3, min_delta=0.1)
-    state.update(25.0)
-    assert state.best_psnr == state.best_score
-    state.best_psnr = 31.0
-    assert state.best_score == 31.0
-
-
 def test_primary_metric_logs_keeps_vmaf_out_of_best_psnr():
     logs = primary_metric_logs(
         primary_key="val/vmaf",

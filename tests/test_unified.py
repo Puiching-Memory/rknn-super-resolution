@@ -60,7 +60,19 @@ def test_load_raw_requires_unified_checkpoint(tmp_path):
     with pytest.raises(TypeError, match="unified training checkpoint"):
         _load_raw(path, torch.device("cpu"))
 
-    torch.save({"state_dict": {"w": torch.tensor(1.0)}, "phase": FLOAT, "step": 3}, path)
+    torch.save({"state_dict": {}, "phase": FLOAT, "step": 3}, path)
+    with pytest.raises(TypeError, match="unified training checkpoint"):
+        _load_raw(path, torch.device("cpu"))
+
+    torch.save(
+        {
+            "state_dict": {"w": torch.tensor(1.0)},
+            "optimizer": {},
+            "phase": FLOAT,
+            "step": 3,
+        },
+        path,
+    )
     raw = _load_raw(path, torch.device("cpu"))
     assert raw["phase"] == FLOAT
     assert raw["step"] == 3

@@ -48,3 +48,17 @@ def test_deploy_config_does_not_restrict_toolkit_targets():
 def test_deploy_config_rejects_empty_target():
     with pytest.raises(ValueError, match="cannot be empty"):
         DeployConfig(target="  ")
+
+
+def test_load_config_rejects_unknown_fields(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("deploy:\n  target: rk3576\n  old_target: rk3588\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"unknown DeployConfig field.*old_target"):
+        load_config(path)
+
+
+def test_load_config_rejects_unknown_sections(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("legacy_deploy: {}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"unknown config section.*legacy_deploy"):
+        load_config(path)

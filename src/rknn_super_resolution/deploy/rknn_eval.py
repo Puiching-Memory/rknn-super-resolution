@@ -9,6 +9,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from rknn_super_resolution.config import ModelConfig
+
 try:
     import cv2
 except ImportError:  # pragma: no cover - optional in minimal envs
@@ -430,14 +432,7 @@ def format_accuracy_table(report: AccuracyReport) -> str:
     return "\n".join(lines)
 
 
-def add_eval_args(parser: argparse.ArgumentParser, model_config=None) -> None:
-    scale = getattr(model_config, "scale", 3)
-    num_channels = getattr(model_config, "num_channels", 32)
-    num_blocks = getattr(model_config, "num_blocks", 4)
-    phase_factor = getattr(model_config, "phase_factor", 2)
-    codec_feature_channels = getattr(model_config, "codec_feature_channels", 96)
-    codec_project_channels = getattr(model_config, "codec_project_channels", 16)
-    codec_upsample_factor = getattr(model_config, "codec_upsample_factor", 4)
+def add_eval_args(parser: argparse.ArgumentParser, model_config: ModelConfig) -> None:
     parser.add_argument(
         "--eval",
         action=argparse.BooleanOptionalAction,
@@ -452,34 +447,28 @@ def add_eval_args(parser: argparse.ArgumentParser, model_config=None) -> None:
     )
     parser.add_argument("--hr_dir", type=str, default="data/DIV2K_valid_HR")
     parser.add_argument("--lr_dir", type=str, default="data/DIV2K_valid_LR_bicubic/X3")
-    parser.add_argument("--scale", type=int, default=scale)
-    parser.add_argument("--num_channels", type=int, default=num_channels)
-    parser.add_argument("--num_blocks", type=int, default=num_blocks)
-    parser.add_argument("--phase_factor", type=int, default=phase_factor)
-    parser.add_argument("--codec_feature_channels", type=int, default=codec_feature_channels)
-    parser.add_argument("--codec_project_channels", type=int, default=codec_project_channels)
-    parser.add_argument("--codec_upsample_factor", type=int, default=codec_upsample_factor)
+    parser.add_argument("--scale", type=int, default=model_config.scale)
+    parser.add_argument("--num_channels", type=int, default=model_config.num_channels)
+    parser.add_argument("--num_blocks", type=int, default=model_config.num_blocks)
+    parser.add_argument("--phase_factor", type=int, default=model_config.phase_factor)
+    parser.add_argument(
+        "--codec_feature_channels", type=int, default=model_config.codec_feature_channels
+    )
+    parser.add_argument(
+        "--codec_project_channels", type=int, default=model_config.codec_project_channels
+    )
+    parser.add_argument(
+        "--codec_upsample_factor", type=int, default=model_config.codec_upsample_factor
+    )
     parser.add_argument("--eval_device", type=str, default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--max_images", type=int, default=100)
-    parser.add_argument(
-        "--eval_hr_dir",
-        type=str,
-        default=None,
-        help="Deprecated alias of --hr_dir.",
-    )
-    parser.add_argument(
-        "--eval_lr_dir",
-        type=str,
-        default=None,
-        help="Deprecated alias of --lr_dir.",
-    )
 
 
 def run_post_build_eval(
     args: argparse.Namespace, runtime: _RknnRuntime, *, quant_mode: str
 ) -> None:
-    hr_dir = Path(args.eval_hr_dir or args.hr_dir)
-    lr_dir = Path(args.eval_lr_dir or args.lr_dir) if (args.eval_lr_dir or args.lr_dir) else None
+    hr_dir = Path(args.hr_dir)
+    lr_dir = Path(args.lr_dir) if args.lr_dir else None
     if not hr_dir.is_dir():
         print(f"--> Eval skipped: HR directory not found: {hr_dir}")
         return
