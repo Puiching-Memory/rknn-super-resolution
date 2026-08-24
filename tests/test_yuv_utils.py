@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from rk3588_mobile_sr.data.yuv_utils import (
+from rknn_super_resolution.data.yuv_utils import (
     colorspace_roundtrip_rgb,
     maybe_rgb_to_colorspace,
     rgb_to_yuv444,
@@ -26,7 +26,9 @@ def test_bt709_primary_coefficients():
     rgb[0] = 255.0
     yuv = rgb_to_yuv444(rgb)
     assert torch.allclose(yuv[0], torch.tensor([[0.2126 * 255.0]]), atol=1e-4)
-    assert torch.allclose(yuv[1], torch.tensor([[127.5 - 0.5 * 0.2126 * 255.0 / 0.9278]]), atol=1e-4)
+    assert torch.allclose(
+        yuv[1], torch.tensor([[127.5 - 0.5 * 0.2126 * 255.0 / 0.9278]]), atol=1e-4
+    )
 
 
 def test_yuv444_to_rgb_chw():
@@ -65,8 +67,8 @@ def test_colorspace_roundtrip_rgb_yuv_recovers_rgb():
 
 
 def test_mlvc_torch_and_numpy_converters_match_yuv_utils():
-    from rk3588_mobile_sr.data.mlvc_loader import rgb_to_mlvc_ycbcr as loader_rgb_to_ycbcr
-    from rk3588_mobile_sr.deploy.rknn_eval import rgb_to_mlvc_ycbcr as numpy_rgb_to_ycbcr
+    from rknn_super_resolution.data.mlvc_loader import rgb_to_mlvc_ycbcr as loader_rgb_to_ycbcr
+    from rknn_super_resolution.deploy.rknn_eval import rgb_to_mlvc_ycbcr as numpy_rgb_to_ycbcr
 
     rgb = torch.rand(1, 3, 8, 12) * 255.0
     yuv_utils = rgb_to_yuv444(rgb)

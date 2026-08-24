@@ -2,7 +2,7 @@
 
 import torch
 
-from rk3588_mobile_sr.utils.sr_metrics import (
+from rknn_super_resolution.utils.sr_metrics import (
     ValidationMetrics,
     batch_psnr,
     batch_y_psnr,
@@ -52,8 +52,8 @@ def test_y_psnr_runs_on_batch():
 def test_validate_ddp_extended_yuv_uses_luma_and_skips_vmaf():
     import torch.nn as nn
 
-    from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
-    from rk3588_mobile_sr.utils.sr_metrics import validate_ddp_extended
+    from rknn_super_resolution.data.yuv_utils import rgb_to_yuv444
+    from rknn_super_resolution.utils.sr_metrics import validate_ddp_extended
 
     class _Passthrough(nn.Module):
         def __init__(self) -> None:

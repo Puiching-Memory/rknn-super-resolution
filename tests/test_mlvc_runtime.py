@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rk3588_mobile_sr.data.mlvc_runtime import FrozenMLVCRuntime, mlvc_model_config
+from rknn_super_resolution.data.mlvc_runtime import FrozenMLVCRuntime, mlvc_model_config
 
 
 class _FakeMLVC(nn.Module):

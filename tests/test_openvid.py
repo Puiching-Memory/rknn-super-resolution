@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from rk3588_mobile_sr.data.openvid import (
+from rknn_super_resolution.data.openvid import (
     OpenVidSequenceDataset,
     collate_openvid_batch,
     crop_box,
@@ -135,8 +135,24 @@ def test_collate_openvid_batch_stacks_video_metadata(tmp_path: Path):
         _write_csv(
             tmp_path / "seqs.csv",
             [
-                _row("000/000", "a.mp4", start_frame=4, n_frames=16, bbox=(0, 0, 96, 54), width=96, height=54),
-                _row("000/001", "b.mp4", start_frame=2, n_frames=16, bbox=(0, 0, 96, 54), width=96, height=54),
+                _row(
+                    "000/000",
+                    "a.mp4",
+                    start_frame=4,
+                    n_frames=16,
+                    bbox=(0, 0, 96, 54),
+                    width=96,
+                    height=54,
+                ),
+                _row(
+                    "000/001",
+                    "b.mp4",
+                    start_frame=2,
+                    n_frames=16,
+                    bbox=(0, 0, 96, 54),
+                    width=96,
+                    height=54,
+                ),
             ],
         ),
         tmp_path,

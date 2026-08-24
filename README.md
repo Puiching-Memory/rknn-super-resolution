@@ -33,7 +33,7 @@ PixelShuffle(6)，并在输出端叠加固定 bicubic 基线。MLVC 的 `ref_fea
 项目只使用 `uv` 管理主环境，要求 Python 3.13，训练栈绑定 CUDA 13.2：
 
 ```bash
-git clone --recurse-submodules https://github.com/Puiching-Memory/rk3588_mobile_sr.git
+git clone --recurse-submodules https://github.com/Puiching-Memory/rknn-super-resolution.git
 uv sync
 uv run pytest
 uv run ruff check src tests
@@ -54,7 +54,7 @@ OpenVidHD 源视频放在 `data/OpenVidHD/` 任意子目录，文件名须与
 ## 配置与训练
 
 默认配置是
-`src/rk3588_mobile_sr/config/phase_rlfn_sr_x3.yaml`。主要参数：
+`src/rknn_super_resolution/config/phase_rlfn_sr_x3.yaml`。主要参数：
 
 ```yaml
 model:
@@ -102,7 +102,7 @@ RESUME=checkpoints/phase-rlfn-codec-v1/last.pth ./scripts/run_train.sh --devices
 导出 codec-aware 双输入 core：
 
 ```bash
-uv run rk3588-mobile-sr export-onnx \
+uv run rknn-super-resolution export-onnx \
   --weight checkpoints/phase-rlfn-codec-v1/best_ema.pth \
   --from-qat --static --output phase_rlfn_sr_x3.onnx
 ```
@@ -110,13 +110,13 @@ uv run rk3588-mobile-sr export-onnx \
 传 `--no-codec-context` 可导出单输入 SR fallback core。生成双输入 PTQ 数据：
 
 ```bash
-uv run rk3588-build-rknn-calibration --samples 100
+uv run rknn-super-resolution-build-rknn-calibration --samples 100
 ```
 
 转换 RKNN：
 
 ```bash
-uv run rk3588-mobile-sr convert-rknn \
+uv run rknn-super-resolution convert-rknn \
   --onnx phase_rlfn_sr_x3.onnx \
   --output phase_rlfn_sr_x3.rknn \
   --target rk3576 \

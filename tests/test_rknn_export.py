@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from rk3588_mobile_sr.deploy.rknn import _default_encrypted_output, _resolve_encrypted_output
+from rknn_super_resolution.deploy.rknn import _default_encrypted_output, _resolve_encrypted_output
 
 
 def test_default_encrypted_output():

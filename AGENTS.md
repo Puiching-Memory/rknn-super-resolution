@@ -1,12 +1,12 @@
 # Agent Guidelines
 
-本文件只记录**方法论与不变量**。命令、目录树、训练参数等事实性内容以 [README.md](README.md)、[pyproject.toml](pyproject.toml)、[config/phase_rlfn_sr_x3.yaml](src/rk3588_mobile_sr/config/phase_rlfn_sr_x3.yaml) 为准；改代码时去读源码，不要在这里双向维护副本。
+本文件只记录**方法论与不变量**。命令、目录树、训练参数等事实性内容以 [README.md](README.md)、[pyproject.toml](pyproject.toml)、[config/phase_rlfn_sr_x3.yaml](src/rknn_super_resolution/config/phase_rlfn_sr_x3.yaml) 为准；改代码时去读源码，不要在这里双向维护副本。
 
 ## 信息从哪来
 
 - **怎么跑**：`scripts/*.sh`（运维入口）→ 内部 `uv run` + `torchrun -m ...`；完整 CLI 列表见 `pyproject.toml` `[project.scripts]`。
 - **默认配置**：`config/phase_rlfn_sr_x3.yaml`；CLI `--config` / 参数可覆盖。
-- **架构与流程**：README；实现细节在 `src/rk3588_mobile_sr/` 对应模块。
+- **架构与流程**：README；实现细节在 `src/rknn_super_resolution/` 对应模块。
 
 ## 环境与工具链
 
@@ -18,7 +18,7 @@
 
 ## 代码放哪、怎么改
 
-- 可安装代码一律在 **`src/rk3588_mobile_sr/`**（src layout）。
+- 可安装代码一律在 **`src/rknn_super_resolution/`**（src layout）。
 - **`scripts/` 只放 bash**；Python 工具进包内（如 `dev/`）并注册 `[project.scripts]`，不要复活 `scripts/*.py`。
 - 先读周边模块再写：命名、类型、抽象层级与现有文件保持一致；改动范围限于任务所需，不顺手重构无关代码。
 - 行为有实质变化时再补测试；不测显然成立的事。
@@ -37,7 +37,7 @@
 
 ## 非显而易见、但值得记住
 
-- `torchrun` 须用 **`-m rk3588_mobile_sr.train.unified`**，不能把 console script 名当文件路径。
+- `torchrun` 须用 **`-m rknn_super_resolution.train.unified`**，不能把 console script 名当文件路径。
 - 勿 `export SWANLAB_EXPERIMENT`（SDK 会误解析）；用 `--swanlab_experiment`。`scripts/_common.sh` 已处理 `NO_PROXY` 等环境。
 - CUDA `VideoDecoder` 默认走 NVDEC；codec 不受支持或 NVCUVID 缺失时 TorchCodec 会 CPU fallback，不是代码 bug，先查驱动 capabilities。
 

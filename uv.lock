@@ -1914,7 +1914,7 @@ wheels = [
 ]
 
 [[package]]
-name = "rk3588-mobile-sr"
+name = "rknn-super-resolution"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

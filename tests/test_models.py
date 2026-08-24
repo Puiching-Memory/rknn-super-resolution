@@ -2,7 +2,7 @@
 
 import torch
 
-from rk3588_mobile_sr.models import PhaseRLFNSR, ResidualLocalBlock
+from rknn_super_resolution.models import PhaseRLFNSR, ResidualLocalBlock
 
 
 def test_phase_rlfn_starts_as_exact_bicubic() -> None:

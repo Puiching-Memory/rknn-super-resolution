@@ -1,5 +1,5 @@
 [project]
-name = "rk3588-mobile-sr"
+name = "rknn-super-resolution"
 version = "0.1.0"
 description = "RK3576 frozen-MLVC codec-aware Phase-RLFN 3x super-resolution"
 readme = "README.md"
@@ -30,14 +30,14 @@ dependencies = [
 # PyTorch requirement conflicts with this project's pinned training stack.
 
 [project.scripts]
-rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
-rk3588-train = "rk3588_mobile_sr.train.unified:main"
-rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
-rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
-rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
-rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
-rk3588-build-rknn-calibration = "rk3588_mobile_sr.dev.build_mlvc_calibration:main"
-rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:main"
+rknn-super-resolution = "rknn_super_resolution.cli:main"
+rknn-super-resolution-train = "rknn_super_resolution.train.unified:main"
+rknn-super-resolution-export-onnx = "rknn_super_resolution.deploy.onnx:main"
+rknn-super-resolution-eval-psnr = "rknn_super_resolution.eval.psnr:evaluate_cli"
+rknn-super-resolution-convert-rknn = "rknn_super_resolution.deploy.rknn:main"
+rknn-super-resolution-bench-rknn-activations = "rknn_super_resolution.deploy.act_fusion_bench:main"
+rknn-super-resolution-build-rknn-calibration = "rknn_super_resolution.dev.build_mlvc_calibration:main"
+rknn-super-resolution-generate-report-charts = "rknn_super_resolution.dev.generate_report_charts:main"
 
 [tool.uv]
 add-bounds = "exact"
@@ -53,7 +53,7 @@ url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.uv.extra-build-dependencies]
-rk3588-mobile-sr = ["meson==1.12.0", "ninja==1.13.0"]
+rknn-super-resolution = ["meson==1.12.0", "ninja==1.13.0"]
 
 [build-system]
 requires = ["hatchling==1.32.0", "meson==1.12.0", "ninja==1.13.0"]
@@ -63,7 +63,7 @@ build-backend = "hatchling.build"
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/rk3588_mobile_sr"]
+packages = ["src/rknn_super_resolution"]
 
 [tool.hatch.build.targets.sdist]
 include = [

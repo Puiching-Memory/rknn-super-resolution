@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rk3588_mobile_sr.distributed.validation import EarlyStopState
-from rk3588_mobile_sr.train.unified import (
+from rknn_super_resolution.distributed.validation import EarlyStopState
+from rknn_super_resolution.train.unified import (
     FLOAT,
     QAT_OBSERVE,
     QAT_STABLE,
@@ -21,11 +21,11 @@ from rk3588_mobile_sr.train.unified import (
     resolve_training_args,
     validate_training_args,
 )
-from rk3588_mobile_sr.utils.train_framework import resolve_model_args
+from rknn_super_resolution.utils.train_framework import resolve_model_args
 
 
 def _parsed_args(monkeypatch, *cli: str):
-    monkeypatch.setattr(sys, "argv", ["rk3588-train", *cli])
+    monkeypatch.setattr(sys, "argv", ["rknn-super-resolution-train", *cli])
     return resolve_training_args(resolve_model_args(parse_args()))
 
 
@@ -83,7 +83,7 @@ def test_validate_training_args_rejects_short_safety_cap(monkeypatch):
 
 
 def test_removed_no_vmaf_flag_is_rejected(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["rk3588-train", "--no_vmaf"])
+    monkeypatch.setattr(sys, "argv", ["rknn-super-resolution-train", "--no_vmaf"])
     with pytest.raises(SystemExit):
         parse_args()
     args = _parsed_args(monkeypatch)
@@ -96,12 +96,8 @@ def test_default_val_metric_is_vmaf_for_all_phases(monkeypatch):
     assert args.colorspace == "yuv"
     assert args.q_indices == [0, 21, 42, 63]
     assert args.sequence_frames == 8
-    float_cfg = _validation_config(
-        args, extended=True, data_preview=True, final_preview=False
-    )
-    qat_cfg = _validation_config(
-        args, extended=False, data_preview=False, final_preview=True
-    )
+    float_cfg = _validation_config(args, extended=True, data_preview=True, final_preview=False)
+    qat_cfg = _validation_config(args, extended=False, data_preview=False, final_preview=True)
     assert float_cfg.compute_vmaf is True
     assert qat_cfg.compute_vmaf is True
     assert float_cfg.colorspace == "yuv"
@@ -112,12 +108,8 @@ def test_default_val_metric_is_vmaf_for_all_phases(monkeypatch):
 def test_val_metric_psnr_disables_vmaf_for_all_phases(monkeypatch):
     args = _parsed_args(monkeypatch, "--val_metric", "psnr")
     assert args.val_metric == "psnr"
-    float_cfg = _validation_config(
-        args, extended=True, data_preview=True, final_preview=False
-    )
-    qat_cfg = _validation_config(
-        args, extended=False, data_preview=False, final_preview=True
-    )
+    float_cfg = _validation_config(args, extended=True, data_preview=True, final_preview=False)
+    qat_cfg = _validation_config(args, extended=False, data_preview=False, final_preview=True)
     assert float_cfg.compute_vmaf is False
     assert qat_cfg.compute_vmaf is False
 

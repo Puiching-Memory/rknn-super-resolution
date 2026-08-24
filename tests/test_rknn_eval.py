@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from rk3588_mobile_sr.deploy.rknn_eval import (
+from rknn_super_resolution.deploy.rknn_eval import (
     AccuracyReport,
     AccuracyRow,
     _rknn_output_to_hwc,

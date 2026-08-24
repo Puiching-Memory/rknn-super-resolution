@@ -9,19 +9,19 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from rk3588_mobile_sr.distributed.context import DistributedContext, distributed_session
-from rk3588_mobile_sr.distributed.model import wrap_training_model
-from rk3588_mobile_sr.distributed.sync import rank0_section
-from rk3588_mobile_sr.distributed.validation import (
+from rknn_super_resolution.distributed.context import DistributedContext, distributed_session
+from rknn_super_resolution.distributed.model import wrap_training_model
+from rknn_super_resolution.distributed.sync import rank0_section
+from rknn_super_resolution.distributed.validation import (
     EarlyStopState,
     ValidationConfig,
     ValidationResult,
     primary_metric_logs,
 )
-from rk3588_mobile_sr.models import PhaseRLFNSR
-from rk3588_mobile_sr.train.loop import StepTrainer
-from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
-from rk3588_mobile_sr.utils.train_framework import (
+from rknn_super_resolution.models import PhaseRLFNSR
+from rknn_super_resolution.train.loop import StepTrainer
+from rknn_super_resolution.train.types import TrainConfig, TrainHooks
+from rknn_super_resolution.utils.train_framework import (
     load_training_module_state_dict,
     training_module_state_dict,
 )
@@ -31,7 +31,7 @@ def test_rank0_section_main_runs_fn_then_barriers():
     ctx = DistributedContext(rank=0, world_size=2, device=torch.device("cpu"))
     ran: list[bool] = []
 
-    with patch("rk3588_mobile_sr.distributed.context.dist.barrier") as mock_barrier:
+    with patch("rknn_super_resolution.distributed.context.dist.barrier") as mock_barrier:
         rank0_section(ctx, lambda: ran.append(True))
 
     assert ran == [True]
@@ -42,7 +42,7 @@ def test_rank0_section_non_main_skips_fn_still_barriers():
     ctx = DistributedContext(rank=1, world_size=2, device=torch.device("cpu"))
     ran: list[bool] = []
 
-    with patch("rk3588_mobile_sr.distributed.context.dist.barrier") as mock_barrier:
+    with patch("rknn_super_resolution.distributed.context.dist.barrier") as mock_barrier:
         rank0_section(ctx, lambda: ran.append(True))
 
     assert ran == []
@@ -167,7 +167,7 @@ def test_step_trainer_runs_steps_and_validation(tmp_path):
             should_stop=step >= 10,
         )
 
-    with patch("rk3588_mobile_sr.train.loop.ValidationRunner.run", fake_run):
+    with patch("rknn_super_resolution.train.loop.ValidationRunner.run", fake_run):
         trainer = StepTrainer(
             ctx,
             model,
@@ -242,7 +242,7 @@ def test_torch_state_dict_api_canonicalizes_compiled_model() -> None:
 
 def test_cuda_barrier_passes_local_device_index():
     ctx = DistributedContext(rank=3, world_size=4, device=torch.device("cuda:1"))
-    with patch("rk3588_mobile_sr.distributed.context.dist.barrier") as mock_barrier:
+    with patch("rknn_super_resolution.distributed.context.dist.barrier") as mock_barrier:
         ctx.barrier()
     mock_barrier.assert_called_once_with(device_ids=[1])
 
@@ -259,7 +259,7 @@ def test_ddp_wrap_uses_device_index_not_global_rank():
 
     ctx = DistributedContext(rank=3, world_size=4, device=torch.device("cuda:1"))
     model = nn.Linear(2, 2)
-    with patch("rk3588_mobile_sr.distributed.model.DDP", _FakeDDP):
+    with patch("rknn_super_resolution.distributed.model.DDP", _FakeDDP):
         wrapped = wrap_training_model(model, ctx, compile_model=False)
     assert captured["device_ids"] == [1]
     assert captured["output_device"] == 1

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from rk3588_mobile_sr.data.decode import (
+from rknn_super_resolution.data.decode import (
     TorchCodecFrameDecoder,
     apply_geometry,
     require_video_file,

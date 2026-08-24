@@ -1,6 +1,6 @@
 """Tests for configuration loading and deploy contracts."""
 
-from rk3588_mobile_sr.config import AppConfig, default_config_path, load_config
+from rknn_super_resolution.config import AppConfig, default_config_path, load_config
 
 
 def test_default_config_deploy_contract():

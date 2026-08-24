@@ -5,14 +5,14 @@ from argparse import Namespace
 import numpy as np
 import torch
 
-from rk3588_mobile_sr.config import load_config
-from rk3588_mobile_sr.deploy.onnx import _CodecCore, _SRCore
-from rk3588_mobile_sr.deploy.rknn import _config_kwargs, _default_input_size
-from rk3588_mobile_sr.deploy.rknn_eval import (
+from rknn_super_resolution.config import load_config
+from rknn_super_resolution.deploy.onnx import _CodecCore, _SRCore
+from rknn_super_resolution.deploy.rknn import _config_kwargs, _default_input_size
+from rknn_super_resolution.deploy.rknn_eval import (
     pixel_shuffle_nchw_to_hwc,
     pixel_unshuffle_hwc_to_nchw,
 )
-from rk3588_mobile_sr.models import PhaseRLFNSR
+from rknn_super_resolution.models import PhaseRLFNSR
 
 
 def test_numpy_phase_packing_uses_pixel_unshuffle_order() -> None:
@@ -50,6 +50,4 @@ def test_onnx_wrappers_match_core_contracts() -> None:
     codec = torch.randn(1, 96, 2, 3)
     with torch.no_grad():
         assert torch.equal(_SRCore(model)(phases), model.forward_core(phases))
-        assert torch.equal(
-            _CodecCore(model)(phases, codec), model.forward_core(phases, codec)
-        )
+        assert torch.equal(_CodecCore(model)(phases, codec), model.forward_core(phases, codec))

@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from rk3588_mobile_sr.losses import CharbonnierLoss, DCTLoss, DISTSLoss
-from rk3588_mobile_sr.utils.pyiqa_metric import PyIQAPerceptualLoss
+from rknn_super_resolution.losses import CharbonnierLoss, DCTLoss, DISTSLoss
+from rknn_super_resolution.utils.pyiqa_metric import PyIQAPerceptualLoss
 
 
 def test_charbonnier_loss_positive():

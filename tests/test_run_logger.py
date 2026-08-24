@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from rk3588_mobile_sr.utils.run_logger import logger, setup_run_logger
+from rknn_super_resolution.utils.run_logger import logger, setup_run_logger
 
 
 def test_setup_run_logger_rank0_writes_file(tmp_path: Path) -> None:

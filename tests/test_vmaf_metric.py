@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from rk3588_mobile_sr.utils.vmaf_metric import (
+from rknn_super_resolution.utils.vmaf_metric import (
     batch_vmaf,
     resolve_vmaf_model_arg,
     rgb_chw_to_yuv420_bytes,
@@ -33,7 +33,7 @@ def test_rgb_to_yuv420_bytes_size():
 
 @pytest.mark.skipif(not _HAS_VMAF, reason="libvmaf/vmaf CLI not installed")
 def test_batch_vmaf_identical_near_100():
-    from rk3588_mobile_sr.utils.vmaf_metric import ensure_vmaf_runtime_env
+    from rknn_super_resolution.utils.vmaf_metric import ensure_vmaf_runtime_env
 
     ensure_vmaf_runtime_env()
     # SpEED in VMAF v1 needs >= ~384px; 384 matches 128 LR patch at 3x.

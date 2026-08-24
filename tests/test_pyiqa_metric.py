@@ -2,7 +2,7 @@
 
 import torch
 
-from rk3588_mobile_sr.utils.pyiqa_metric import (
+from rknn_super_resolution.utils.pyiqa_metric import (
     batch_perceptual_metric,
     normalize_for_pyiqa,
 )
@@ -20,7 +20,7 @@ def test_batch_perceptual_metric_returns_per_sample_scores(monkeypatch):
             return pred.new_ones(pred.shape[0])
 
     monkeypatch.setattr(
-        "rk3588_mobile_sr.utils.pyiqa_metric.get_pyiqa_metric",
+        "rknn_super_resolution.utils.pyiqa_metric.get_pyiqa_metric",
         lambda **_kwargs: _FakeMetric(),
     )
     device = torch.device("cpu")

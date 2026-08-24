@@ -2,8 +2,8 @@
 
 import torch
 
-from rk3588_mobile_sr.models import PhaseRLFNSR
-from rk3588_mobile_sr.utils.model_diagnostics import (
+from rknn_super_resolution.models import PhaseRLFNSR
+from rknn_super_resolution.utils.model_diagnostics import (
     ForwardDiagnosticsTracker,
     check_deploy_consistency,
     collect_grad_norms,

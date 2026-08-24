@@ -1,6 +1,6 @@
 """Unit tests for RKNN activation fusion benchmark helpers."""
 
-from rk3588_mobile_sr.deploy.act_fusion_bench import (
+from rknn_super_resolution.deploy.act_fusion_bench import (
     ActBenchRow,
     _parse_fuse_notes,
     _parse_rknn_ops,

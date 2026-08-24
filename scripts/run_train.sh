@@ -14,7 +14,7 @@ Script options:
   -e, --experiment NAME  SwanLab experiment name
   -h, --help             Show this help
 
-Any other arguments are forwarded to rk3588_mobile_sr.train.unified.
+Any other arguments are forwarded to rknn_super_resolution.train.unified.
 Environment: NPROC, CUDA_VISIBLE_DEVICES, SAVE_DIR, RESUME,
 TRAIN_EXPERIMENT_NAME, EXTRA_ARGS.
 
@@ -167,7 +167,7 @@ export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
 echo "[$(date -Is)] starting unified training ${NPROC}gpu experiment=$EXP_NAME devices=${CUDA_VISIBLE_DEVICES:-all} nccl_p2p_disable=$NCCL_P2P_DISABLE" | tee -a "$CONSOLE_LOG"
 
 exec >>"$CONSOLE_LOG" 2>&1
-run_torchrun "$NPROC" -m rk3588_mobile_sr.train.unified \
+run_torchrun "$NPROC" -m rknn_super_resolution.train.unified \
   --dataset_description data/OpenVidHD/openvidhd_60k64_frame_sequences.csv \
   --video_root data/OpenVidHD \
   --mlvc_repo third_party/mlvc \
@@ -175,7 +175,7 @@ run_torchrun "$NPROC" -m rk3588_mobile_sr.train.unified \
   --val_every 1000 \
   --save_every 5000 \
   --log_every 500 \
-  --swanlab_project rk3588-mobile-sr \
+  --swanlab_project rknn-super-resolution \
   --swanlab_experiment "$EXP_NAME" \
   --save_dir "$SAVE_DIR" \
   "${FORWARD[@]}" \

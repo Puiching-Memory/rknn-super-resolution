@@ -2,8 +2,8 @@
 
 import torch
 
-from rk3588_mobile_sr.models import PhaseRLFNSR
-from rk3588_mobile_sr.models.qat_utils import prepare_model_for_qat
+from rknn_super_resolution.models import PhaseRLFNSR
+from rknn_super_resolution.models.qat_utils import prepare_model_for_qat
 
 
 def test_qat_prepares_only_residual_core() -> None:

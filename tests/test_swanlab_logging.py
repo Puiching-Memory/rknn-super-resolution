@@ -10,9 +10,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from rk3588_mobile_sr.config import default_config_path
-from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
-from rk3588_mobile_sr.utils.swanlab_logging import (
+from rknn_super_resolution.config import default_config_path
+from rknn_super_resolution.data.yuv_utils import rgb_to_yuv444
+from rknn_super_resolution.utils.swanlab_logging import (
     _looks_like_local_run_suffix,
     build_swanlab_run_config,
     collect_data_preview_samples,
@@ -26,7 +26,7 @@ from rk3588_mobile_sr.utils.swanlab_logging import (
     save_sr_panels,
     save_swanlab_run_record,
 )
-from rk3588_mobile_sr.utils.train_framework import resolve_colorspace
+from rknn_super_resolution.utils.train_framework import resolve_colorspace
 
 
 class _Identity(nn.Module):
@@ -68,7 +68,7 @@ def test_collect_data_preview_forwards_train_colorspace(monkeypatch):
         return np.zeros((8, 24, 3), dtype=np.uint8)
 
     monkeypatch.setattr(
-        "rk3588_mobile_sr.utils.swanlab_logging.make_data_preview_panel",
+        "rknn_super_resolution.utils.swanlab_logging.make_data_preview_panel",
         fake_panel,
     )
     rgb = torch.zeros(1, 3, 8, 8)
@@ -144,16 +144,14 @@ def test_find_swanlab_run_id_prefers_earliest_matching_experiment(tmp_path: Path
         }
         (files / "swanlab-metadata.json").write_text(json.dumps(meta), encoding="utf-8")
 
-    assert (
-        find_swanlab_run_id(tmp_path, "train-8gpu-20260821-1608") == "sx4e2ajn"
-    )
+    assert find_swanlab_run_id(tmp_path, "train-8gpu-20260821-1608") == "sx4e2ajn"
 
 
 def test_save_and_load_swanlab_run_record(tmp_path: Path):
     save_swanlab_run_record(
         tmp_path,
         run_id="gjid8vrb1jigurxquwabt",
-        project="rk3588-mobile-sr",
+        project="rknn-super-resolution",
         experiment_name="train-8gpu-20260821-1608",
     )
     record = load_swanlab_run_record(tmp_path)
@@ -171,16 +169,16 @@ def test_resolve_swanlab_run_id_uses_cloud_lookup_for_local_suffix(tmp_path: Pat
     save_swanlab_run_record(
         tmp_path,
         run_id="sx4e2ajn",
-        project="rk3588-mobile-sr",
+        project="rknn-super-resolution",
         experiment_name="train-8gpu-20260821-1608",
     )
     monkeypatch.setattr(
-        "rk3588_mobile_sr.utils.swanlab_logging.lookup_swanlab_cloud_run_id",
+        "rknn_super_resolution.utils.swanlab_logging.lookup_swanlab_cloud_run_id",
         lambda project, experiment_name: "gjid8vrb1jigurxquwabt",
     )
     run_id = resolve_swanlab_run_id(
         save_dir=tmp_path,
-        project="rk3588-mobile-sr",
+        project="rknn-super-resolution",
         experiment_name="train-8gpu-20260821-1608",
         resume_checkpoint="dummy.pth",
     )

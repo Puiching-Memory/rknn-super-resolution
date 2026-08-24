@@ -6,13 +6,13 @@ from typing import Any
 
 import torch
 
-from rk3588_mobile_sr.data.mlvc_loader import (
+from rknn_super_resolution.data.mlvc_loader import (
     MLVCBatchProcessor,
     MLVCDeviceBatch,
     mlvc_ycbcr_to_rgb,
     rgb_to_mlvc_ycbcr,
 )
-from rk3588_mobile_sr.data.mlvc_runtime import MLVCReconstruction
+from rknn_super_resolution.data.mlvc_runtime import MLVCReconstruction
 
 
 class _PassthroughRuntime:
@@ -20,9 +20,7 @@ class _PassthroughRuntime:
         self.q_index: torch.Tensor | None = None
         self.input_shape: tuple[int, ...] | None = None
 
-    def reconstruct(
-        self, sequence: torch.Tensor, q_index: torch.Tensor
-    ) -> MLVCReconstruction:
+    def reconstruct(self, sequence: torch.Tensor, q_index: torch.Tensor) -> MLVCReconstruction:
         self.q_index = q_index.clone()
         self.input_shape = tuple(sequence.shape)
         batch, time = sequence.shape[:2]
