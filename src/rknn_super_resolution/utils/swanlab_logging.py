@@ -841,9 +841,7 @@ def collect_sr_validation_panels(
         hr = hr.to(device, non_blocking=True)
         bicubic_base = getattr(unwrap, "bicubic_base", None)
         baseline = (
-            bicubic_base(lr)
-            if callable(bicubic_base)
-            else bicubic_lr_canvas(lr, hr.shape[-2:])
+            bicubic_base(lr) if callable(bicubic_base) else bicubic_lr_canvas(lr, hr.shape[-2:])
         )
         sr = torch.clamp(forward_sr(unwrap, model_input), 0.0, 255.0)
         for i in range(lr.shape[0]):

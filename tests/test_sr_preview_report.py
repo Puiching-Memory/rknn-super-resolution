@@ -24,17 +24,12 @@ def test_assemble_grid_layout(tmp_path):
     tile_hw = (16, 24)
     rows, cols = len(GRID_TITLES), len(GRID_TITLES[0])
     panels = [
-        np.full((rows * tile_hw[0], cols * tile_hw[1], 3), 128, dtype=np.uint8)
-        for _ in range(3)
+        np.full((rows * tile_hw[0], cols * tile_hw[1], 3), 128, dtype=np.uint8) for _ in range(3)
     ]
-    out = assemble_grid(
-        panels, tmp_path / "grid.png", tile_hw=tile_hw, captions=["a", "b", "c"]
-    )
+    out = assemble_grid(panels, tmp_path / "grid.png", tile_hw=tile_hw, captions=["a", "b", "c"])
     canvas = Image.open(out)
     group_w = cols * GRID_TILE_W + 2 * GRID_BORDER + 2 * GRID_PAD
-    group_h = (
-        GRID_CAPTION_H + rows * (GRID_TITLE_H + GRID_TILE_H) + 2 * GRID_BORDER + 2 * GRID_PAD
-    )
+    group_h = GRID_CAPTION_H + rows * (GRID_TITLE_H + GRID_TILE_H) + 2 * GRID_BORDER + 2 * GRID_PAD
     grid_rows = 2
     assert canvas.size == (
         GRID_COLS * group_w + (GRID_COLS - 1) * GRID_GAP,

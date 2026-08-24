@@ -60,8 +60,14 @@ GRID_PAD = 10
 GRID_GAP = 24
 GRID_COLS = 2
 GROUP_COLORS = [
-    "#e11d48", "#2563eb", "#16a34a", "#d97706",
-    "#7c3aed", "#0891b2", "#db2777", "#65a30d",
+    "#e11d48",
+    "#2563eb",
+    "#16a34a",
+    "#d97706",
+    "#7c3aed",
+    "#0891b2",
+    "#db2777",
+    "#65a30d",
 ]
 GRID_FONT_PATHS = [
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
@@ -308,9 +314,7 @@ def assemble_grid(
     title_font = _load_font(26)
     caption_font = _load_font(28)
     group_w = cols * GRID_TILE_W + 2 * GRID_BORDER + 2 * GRID_PAD
-    group_h = (
-        GRID_CAPTION_H + rows * (GRID_TITLE_H + GRID_TILE_H) + 2 * GRID_BORDER + 2 * GRID_PAD
-    )
+    group_h = GRID_CAPTION_H + rows * (GRID_TITLE_H + GRID_TILE_H) + 2 * GRID_BORDER + 2 * GRID_PAD
     grid_rows = (len(panels) + GRID_COLS - 1) // GRID_COLS
     canvas_w = GRID_COLS * group_w + (GRID_COLS - 1) * GRID_GAP
     canvas_h = grid_rows * group_h + (grid_rows - 1) * GRID_GAP
@@ -330,7 +334,12 @@ def assemble_grid(
             caption = f"{caption} · {captions[idx]}"
         _centered_text(
             draw,
-            (gx + GRID_BORDER, gy + GRID_BORDER, gx + group_w - GRID_BORDER, gy + GRID_BORDER + GRID_CAPTION_H),
+            (
+                gx + GRID_BORDER,
+                gy + GRID_BORDER,
+                gx + group_w - GRID_BORDER,
+                gy + GRID_BORDER + GRID_CAPTION_H,
+            ),
             caption,
             caption_font,
             fill=color,
@@ -343,7 +352,10 @@ def assemble_grid(
                 ty = gy + GRID_BORDER + GRID_PAD + GRID_CAPTION_H + r * (GRID_TITLE_H + GRID_TILE_H)
                 draw.rectangle((tx, ty, tx + GRID_TILE_W, ty + GRID_TITLE_H), fill="#111827")
                 _centered_text(
-                    draw, (tx, ty, tx + GRID_TILE_W, ty + GRID_TITLE_H), GRID_TITLES[r][c], title_font
+                    draw,
+                    (tx, ty, tx + GRID_TILE_W, ty + GRID_TITLE_H),
+                    GRID_TITLES[r][c],
+                    title_font,
                 )
                 canvas.paste(tile, (tx, ty + GRID_TITLE_H))
 
