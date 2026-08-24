@@ -1,4 +1,4 @@
-"""Shared training framework for MobileOneSR stages."""
+"""Shared training framework for PhaseRLFNSR stages."""
 
 from __future__ import annotations
 
@@ -12,11 +12,15 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+from torch.distributed.checkpoint.state_dict import (
+    get_model_state_dict,
+    set_model_state_dict,
+)
 from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.config import load_config
 from rk3588_mobile_sr.data.mlvc_loader import MLVCTrainLoader, build_mlvc_loaders
-from rk3588_mobile_sr.models import MobileOneSR
+from rk3588_mobile_sr.models import PhaseRLFNSR
 from rk3588_mobile_sr.utils.traceml_profiling import add_traceml_args
 
 
@@ -40,9 +44,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--config",
         type=str,
         default=None,
-        help="YAML config path (default: bundled mobileone_sr_x3.yaml)",
+        help="YAML config path (default: bundled phase_rlfn_sr_x3.yaml)",
     )
     parser.add_argument("--dataset_description", type=str, default=None)
+    parser.add_argument("--video_root", type=str, default=None)
     parser.add_argument("--mlvc_repo", type=str, default=None)
     parser.add_argument("--mlvc_checkpoint", type=str, default=None)
     parser.add_argument(
@@ -55,17 +60,24 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--num_channels", type=int, default=None)
     parser.add_argument("--num_blocks", type=int, default=None)
     parser.add_argument("--phase_factor", type=int, default=None)
-    parser.add_argument("--output_kernel_size", type=int, choices=[1, 3], default=None)
-    parser.add_argument("--num_conv_branches", type=int, default=None)
+    parser.add_argument(
+        "--codec-context",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="use MLVC decoder features; disable for the SR-only fallback",
+    )
+    parser.add_argument("--codec_dropout", type=float, default=None)
+    parser.add_argument("--codec_feature_channels", type=int, default=None)
+    parser.add_argument("--codec_project_channels", type=int, default=None)
+    parser.add_argument("--codec_upsample_factor", type=int, default=None)
     parser.add_argument("--negative_slope", type=float, default=None)
     parser.add_argument(
         "--colorspace",
         type=str,
         default=None,
         choices=["rgb", "yuv"],
-        help="MobileOne tensor layout: RGB or MLVC BT.709 YCbCr444 in [0,255]",
+        help="SR tensor layout: RGB or MLVC BT.709 YCbCr444 in [0,255]",
     )
-    parser.add_argument("--patch_size", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=2, help="per-GPU sequence batch size")
     parser.add_argument(
         "--prefetch_batches",
@@ -155,8 +167,9 @@ def resolve_model_args(args: argparse.Namespace) -> argparse.Namespace:
         "num_channels",
         "num_blocks",
         "phase_factor",
-        "output_kernel_size",
-        "num_conv_branches",
+        "codec_feature_channels",
+        "codec_project_channels",
+        "codec_upsample_factor",
         "negative_slope",
     ):
         if getattr(args, name, None) is None:
@@ -223,7 +236,7 @@ def require_cuda() -> None:
     """Ensure a CUDA-capable PyTorch build and visible GPU are available."""
     if not torch.cuda.is_available():
         raise RuntimeError(
-            "CUDA is required but unavailable. Run `uv sync` to install cu130 PyTorch."
+            "CUDA is required but unavailable. Run `uv sync` to install cu132 PyTorch."
         )
 
 
@@ -238,60 +251,48 @@ def setup_device(args: argparse.Namespace) -> torch.device:
     raise ValueError(f"Only CUDA devices are supported, got {device_name!r}")
 
 
-def _training_module_for_state_dict(model: nn.Module) -> nn.Module:
-    """Return the innermost trainable module for checkpoint load/save."""
-    from rk3588_mobile_sr.distributed.model import unwrap_model
-
-    inner = unwrap_model(model)
-    if hasattr(inner, "_orig_mod"):
-        return inner._orig_mod
-    return inner
-
-
 def training_module_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Serialize model weights without DDP/compile prefixes."""
-    return _training_module_for_state_dict(model).state_dict()
+    """Return PyTorch's canonical state dict across plain/DDP/compiled models."""
+    return dict(get_model_state_dict(model))
 
 
-def _normalize_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Strip DDP ``module.`` and ``torch.compile`` ``_orig_mod.`` prefixes."""
-    normalized: dict[str, torch.Tensor] = {}
-    for key, value in state_dict.items():
-        name = key
-        if name.startswith("_orig_mod."):
-            name = name.removeprefix("_orig_mod.")
-        if name.startswith("module."):
-            name = name.removeprefix("module.")
-        normalized[name] = value
-    return normalized
-
-
+def load_training_module_state_dict(
+    model: nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> None:
+    """Load a canonical model state through PyTorch's distributed API."""
+    incompatible = set_model_state_dict(model, state_dict)
+    if incompatible.missing_keys or incompatible.unexpected_keys:
+        raise RuntimeError(
+            "checkpoint does not match model: "
+            f"missing={incompatible.missing_keys}, "
+            f"unexpected={incompatible.unexpected_keys}"
+        )
 def build_model(
     args: argparse.Namespace,
     device: torch.device,
     *,
-    inference_mode: bool = False,
     weight_path: str | None = None,
     strict_load: bool = True,
-) -> MobileOneSR:
-    """Build the E-architecture SR model and optionally load pretrained weights."""
+) -> PhaseRLFNSR:
+    """Build PhaseRLFNSR and optionally load its native checkpoint."""
     resolve_model_args(args)
-    model = MobileOneSR(
+    model = PhaseRLFNSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         phase_factor=args.phase_factor,
-        output_kernel_size=args.output_kernel_size,
-        num_conv_branches=args.num_conv_branches,
-        inference_mode=inference_mode,
+        codec_feature_channels=args.codec_feature_channels,
+        codec_project_channels=args.codec_project_channels,
+        codec_upsample_factor=args.codec_upsample_factor,
         negative_slope=args.negative_slope,
     ).to(device)
     if weight_path is not None:
         raw = torch.load(weight_path, map_location=device, weights_only=False)
         if isinstance(raw, dict) and "state_dict" in raw:
-            state_dict = _normalize_state_dict(raw["state_dict"])
+            state_dict = raw["state_dict"]
         elif isinstance(raw, dict):
-            state_dict = _normalize_state_dict(raw)
+            state_dict = raw
         else:
             raise TypeError(f"Unsupported checkpoint format in {weight_path}")
         model.load_state_dict(state_dict, strict=strict_load)
@@ -319,19 +320,21 @@ def build_loaders(
     data = app_cfg.data
     overrides = {
         "dataset_description": getattr(args, "dataset_description", None),
+        "video_root": getattr(args, "video_root", None),
         "mlvc_repo": getattr(args, "mlvc_repo", None),
         "mlvc_checkpoint": getattr(args, "mlvc_checkpoint", None),
         "mlvc_variant": getattr(args, "mlvc_variant", None),
         "sequence_frames": getattr(args, "sequence_frames", None),
         "q_indices": tuple(args.q_indices) if getattr(args, "q_indices", None) else None,
         "num_workers": getattr(args, "num_workers", None),
+        "codec_context": getattr(args, "codec_context", None),
+        "codec_dropout": getattr(args, "codec_dropout", None),
     }
     data = replace(data, **{name: value for name, value in overrides.items() if value is not None})
     train_bundle, val_loader = build_mlvc_loaders(
         data,
         device=device,
         batch_size=args.batch_size,
-        patch_size=getattr(args, "patch_size", None),
         scale=getattr(args, "scale", 3),
         colorspace=getattr(args, "colorspace", None) or data.colorspace,
         train_aug=train_aug and data.augment,
@@ -349,24 +352,6 @@ def find_free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
-
-
-def setup_ddp(
-    rank: int | None = None,
-    world_size: int | None = None,
-    *,
-    device_id: torch.device | None = None,
-) -> int:
-    """Initialize NCCL process group; prefer :func:`distributed_session` in new code."""
-    from rk3588_mobile_sr.distributed.context import _init_process_group
-
-    ctx = _init_process_group(rank, world_size, device_id=device_id)
-    return ctx.rank
-
-
-def cleanup_ddp() -> None:
-    if dist.is_initialized():
-        dist.destroy_process_group()
 
 
 def save_checkpoint_dict(

@@ -1,8 +1,8 @@
-"""Tests for model training diagnostics."""
+"""Tests for Phase-RLFN training diagnostics."""
 
 import torch
 
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import PhaseRLFNSR
 from rk3588_mobile_sr.utils.model_diagnostics import (
     ForwardDiagnosticsTracker,
     check_deploy_consistency,
@@ -11,38 +11,33 @@ from rk3588_mobile_sr.utils.model_diagnostics import (
 )
 
 
-def test_forward_tracker_reports_skip_and_clip_stats():
-    model = MobileOneSR(num_blocks=2, num_channels=8)
+def test_forward_tracker_reports_skip_and_clip_stats() -> None:
+    model = PhaseRLFNSR(num_blocks=2, num_channels=8)
     tracker = ForwardDiagnosticsTracker(model)
     try:
-        x = torch.rand(1, 3, 32, 32) * 255.0
-        model(x)
+        model(torch.rand(1, 3, 16, 16) * 255.0)
         stats = tracker.read_stats()
         assert "model/skip_ratio" in stats
         assert "model/clip_sat_low" in stats
-        assert "model/clip_sat_high" in stats
-        assert stats["model/skip_ratio"] >= 0.0
+        assert "model/residual_abs_mean" in stats
     finally:
         tracker.close()
 
 
-def test_grad_and_weight_norm_groups():
-    model = MobileOneSR(num_blocks=2, num_channels=8)
-    x = torch.rand(1, 3, 32, 32) * 255.0
-    out = model(x)
-    out.mean().backward()
-
-    grad_norms = collect_grad_norms(model)
-    weight_norms = collect_param_norms(model, prefix="weight_norm")
-    assert "grad_norm/stem" in grad_norms
-    assert "grad_norm/out_conv" in grad_norms
-    assert "weight_norm/body_0" in weight_norms
+def test_grad_and_weight_norm_groups() -> None:
+    model = PhaseRLFNSR(num_blocks=2, num_channels=8)
+    model(torch.rand(1, 3, 16, 16) * 255.0).mean().backward()
+    assert "grad_norm/stem" in collect_grad_norms(model)
+    assert "grad_norm/residual_head" in collect_grad_norms(model)
+    assert "weight_norm/block_0" in collect_param_norms(model, prefix="weight_norm")
 
 
-def test_deploy_consistency_is_near_zero():
-    model = MobileOneSR(num_blocks=2, num_channels=8)
-    model.eval()
-    loader = [(torch.rand(1, 3, 32, 32) * 255.0, torch.rand(1, 3, 96, 96) * 255.0)]
+def test_deploy_consistency_is_exact_with_codec_input() -> None:
+    model = PhaseRLFNSR(num_blocks=1, num_channels=8).eval()
+    model_input = (
+        torch.rand(1, 3, 16, 16) * 255.0,
+        torch.randn(1, 96, 2, 2),
+    )
+    loader = [(model_input, torch.rand(1, 3, 48, 48) * 255.0)]
     metrics = check_deploy_consistency(model, loader, torch.device("cpu"), max_batches=1)
-    assert metrics["deploy/max_abs_diff"] < 1e-3
-    assert metrics["deploy/psnr_train_vs_deploy"] > 80.0
+    assert metrics["deploy/max_abs_diff"] == 0.0

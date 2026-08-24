@@ -5,12 +5,21 @@ from __future__ import annotations
 import importlib
 import sys
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+
+
+@dataclass
+class MLVCReconstruction:
+    """Reconstructed P-frames and their decoder-side recurrent features."""
+
+    frames: torch.Tensor
+    features: torch.Tensor
 
 
 def mlvc_model_config(variant: str) -> dict[str, Any]:
@@ -111,8 +120,12 @@ class FrozenMLVCRuntime:
         self.amp = amp and device.type == "cuda"
         self._lock = Lock()
 
-    def reconstruct(self, sequence: torch.Tensor, q_index: torch.Tensor) -> torch.Tensor:
-        """Return the last reconstructed P-frame from a BT.709 YCbCr sequence."""
+    def reconstruct(self, sequence: torch.Tensor, q_index: torch.Tensor) -> MLVCReconstruction:
+        """Return reconstructed P-frames and decoder features.
+
+        Frame 0 is the uncompressed DPB reference and is not returned. The output
+        layout is ``B x (T-1) x 3 x H x W`` in ``[0, 1]``.
+        """
         if sequence.ndim != 5 or sequence.shape[1] < 2 or sequence.shape[2] != 3:
             raise ValueError("MLVC input must be BxTx3xHxW with T >= 2")
         if q_index.ndim != 1 or q_index.shape[0] != sequence.shape[0]:
@@ -144,7 +157,8 @@ class FrozenMLVCRuntime:
                     "ref_frame": sequence[:, 0],
                     "ref_feature": None,
                 }
-                result = None
+                frames: list[torch.Tensor] = []
+                features: list[torch.Tensor] = []
                 frame_map = tuple(getattr(self.model, "frame_index_map", (0, 1, 0, 2, 0, 2, 0, 2)))
                 for frame_index in range(1, sequence.shape[1]):
                     result = self.model.compress_core(
@@ -154,7 +168,15 @@ class FrozenMLVCRuntime:
                         fa_idx=frame_map[frame_index % len(frame_map)],
                     )
                     dpb = result["dpb"]
-                assert result is not None
-                output = dpb["ref_frame"]
-            output = output[..., :height, :width]
-            return torch.nan_to_num(output.float(), nan=0.0, posinf=1.0).clamp_(0.0, 1.0)
+                    ref = dpb["ref_frame"]
+                    feature = dpb["ref_feature"]
+                    assert ref is not None
+                    assert feature is not None
+                    frames.append(ref[..., :height, :width])
+                    features.append(feature)
+        output = torch.stack(frames, dim=1)
+        feature_output = torch.stack(features, dim=1)
+        return MLVCReconstruction(
+            frames=torch.nan_to_num(output.float(), nan=0.0, posinf=1.0).clamp_(0.0, 1.0),
+            features=torch.nan_to_num(feature_output.float(), nan=0.0),
+        )

@@ -58,7 +58,8 @@ def resolve_vmaf_binary() -> str:
     binary = shutil.which("vmaf")
     if binary is None:
         raise FileNotFoundError(
-            "vmaf CLI not found. Build Netflix libvmaf first:\n"
+            "vmaf CLI not found. libvmaf is part of the project environment:\n"
+            "  uv sync\n"
             "  ./scripts/setup_vmaf.sh"
         )
     return binary
@@ -72,6 +73,14 @@ def resolve_vmaf_model_arg(model: str = DEFAULT_VMAF_MODEL) -> str:
     alias = VMAF_MODEL_ALIASES.get(key.lower(), key)
     # Prefer built-in compiled models from libvmaf 3.2+ / VMAF v1.
     return f"version={alias}"
+
+
+def resolved_vmaf_model_id(model: str = DEFAULT_VMAF_MODEL) -> str:
+    """Return the libvmaf model id (without ``version=`` / ``path=``)."""
+    arg = resolve_vmaf_model_arg(model)
+    if arg.startswith("version=") or arg.startswith("path="):
+        return arg.split("=", 1)[1]
+    return arg
 
 
 def rgb_chw_to_yuv420_bytes(rgb: torch.Tensor) -> bytes:

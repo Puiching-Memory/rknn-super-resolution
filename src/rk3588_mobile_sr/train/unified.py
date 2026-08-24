@@ -7,40 +7,34 @@ import copy
 from pathlib import Path
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 
 from rk3588_mobile_sr.config import load_config
 from rk3588_mobile_sr.distributed import (
-    SyncBnPolicy,
     distributed_session,
     unwrap_model,
     wrap_training_model,
 )
 from rk3588_mobile_sr.distributed.validation import EarlyStopState, ValidationConfig
-from rk3588_mobile_sr.models.qat_utils import (
-    bn_recalibrate,
-    convert_qat_model,
-    prepare_model_for_qat,
-)
+from rk3588_mobile_sr.models.qat_utils import convert_qat_model, prepare_model_for_qat
 from rk3588_mobile_sr.train.session import TrainSession
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.run_logger import logger
 from rk3588_mobile_sr.utils.swanlab_logging import get_swanlab_run_id
 from rk3588_mobile_sr.utils.train_framework import (
     TrainAccel,
-    _normalize_state_dict,
-    _training_module_for_state_dict,
     add_common_args,
     build_model,
     build_train_accel,
+    load_training_module_state_dict,
     resolve_colorspace,
     resolve_model_args,
     resolve_prefetch_batches,
     save_checkpoint_dict,
     training_module_state_dict,
 )
+from rk3588_mobile_sr.utils.vmaf_metric import resolve_vmaf_binary
 
 FLOAT = "float"
 QAT_OBSERVE = "qat_observe"
@@ -51,12 +45,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     add_common_args(parser)
     parser.set_defaults(
-        patch_size=None,
         batch_size=None,
         log_every=None,
-        save_dir="./checkpoints/train",
     )
-    parser.add_argument("--qat_patch_size", type=int, default=None)
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="./checkpoints/train",
+        help="checkpoint root for this unified run",
+    )
     parser.add_argument("--qat_batch_size", type=int, default=None)
     parser.add_argument("--float_lr", type=float, default=None)
     parser.add_argument("--qat_lr", type=float, default=None)
@@ -77,7 +74,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip_min", type=float, default=None)
     parser.add_argument("--clip_max", type=float, default=None)
     parser.add_argument("--ema_decay", type=float, default=None)
-    parser.add_argument("--bn_batches", type=int, default=None)
     parser.add_argument("--backend", type=str, default=None)
     parser.add_argument(
         "--resume",
@@ -86,21 +82,26 @@ def parse_args() -> argparse.Namespace:
         help="resume a unified checkpoint; its phase controls graph reconstruction",
     )
     parser.add_argument(
+        "--val_metric",
+        type=str,
+        choices=("vmaf", "psnr"),
+        default=None,
+        help="primary validation metric for every phase (default: config training.val_metric)",
+    )
+    parser.add_argument(
         "--vmaf_model",
         type=str,
         default="1080p",
         help="VMAF v1 model alias or version=/path= override",
     )
-    parser.add_argument("--no_vmaf", action="store_true")
     return parser.parse_args()
 
 
 def resolve_training_args(args: argparse.Namespace) -> argparse.Namespace:
-    training = load_config(getattr(args, "config", None)).training
+    cfg = load_config(getattr(args, "config", None))
+    training = cfg.training
     for name in (
-        "patch_size",
         "batch_size",
-        "qat_patch_size",
         "qat_batch_size",
         "log_every",
         "float_lr",
@@ -122,19 +123,43 @@ def resolve_training_args(args: argparse.Namespace) -> argparse.Namespace:
         "clip_min",
         "clip_max",
         "ema_decay",
-        "bn_batches",
         "backend",
+        "val_metric",
     ):
         if getattr(args, name, None) is None:
             setattr(args, name, getattr(training, name))
+    if getattr(args, "lr_size", None) is None:
+        args.lr_size = tuple(cfg.data.lr_size)
+    if getattr(args, "hr_size", None) is None:
+        args.hr_size = tuple(cfg.data.hr_size)
+    data = cfg.data
+    for name in (
+        "dataset_description",
+        "video_root",
+        "mlvc_repo",
+        "mlvc_checkpoint",
+        "mlvc_variant",
+        "sequence_frames",
+        "num_workers",
+        "colorspace",
+        "prefetch_batches",
+        "codec_context",
+        "codec_dropout",
+    ):
+        if getattr(args, name, None) is None:
+            setattr(args, name, getattr(data, name))
+    if getattr(args, "q_indices", None) is None:
+        args.q_indices = list(data.q_indices)
+    if getattr(args, "config", None) is None:
+        from rk3588_mobile_sr.config import default_config_path
+
+        args.config = str(default_config_path())
     return args
 
 
 def validate_training_args(args: argparse.Namespace) -> None:
     for name in (
-        "patch_size",
         "batch_size",
-        "qat_patch_size",
         "qat_batch_size",
         "log_every",
         "val_every",
@@ -148,7 +173,6 @@ def validate_training_args(args: argparse.Namespace) -> None:
         "qat_patience",
         "qat_min_evaluations",
         "qat_safety_max_steps",
-        "bn_batches",
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
@@ -159,9 +183,17 @@ def validate_training_args(args: argparse.Namespace) -> None:
         raise ValueError("ema_decay must be in (0, 1)")
     if args.clip_min >= args.clip_max:
         raise ValueError("clip_min must be less than clip_max")
-    for name in ("patch_size", "qat_patch_size"):
-        if getattr(args, name) % args.phase_factor:
-            raise ValueError(f"{name} must be divisible by phase_factor")
+    if not 0.0 <= args.codec_dropout <= 1.0:
+        raise ValueError("codec_dropout must be in [0, 1]")
+    lr_h, lr_w = args.lr_size
+    hr_h, hr_w = args.hr_size
+    if lr_h % args.phase_factor or lr_w % args.phase_factor:
+        raise ValueError("lr_size must be divisible by phase_factor")
+    if (hr_h, hr_w) != (lr_h * args.scale, lr_w * args.scale):
+        raise ValueError("hr_size must equal lr_size scaled by model.scale")
+    args.val_metric = str(args.val_metric).strip().lower()
+    if args.val_metric not in {"vmaf", "psnr"}:
+        raise ValueError("val_metric must be 'vmaf' or 'psnr'")
     phase_guards = (
         ("float", args.float_safety_max_steps, args.float_min_evaluations),
         ("observer", args.observer_safety_max_steps, args.observer_min_evaluations),
@@ -216,8 +248,10 @@ def _checkpoint(
     if early_stop is not None:
         checkpoint["early_stop"] = {
             "best_score": early_stop.best_score,
+            "plateau_score": early_stop.plateau_score,
             "patience_counter": early_stop.patience_counter,
             "evaluations": early_stop.evaluations,
+            "psnr_at_best": early_stop.psnr_at_best,
         }
     if lr_scheduler is not None:
         checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
@@ -244,9 +278,7 @@ def _restore(
     early_stop: EarlyStopState | None = None,
     lr_scheduler: optim.lr_scheduler.ReduceLROnPlateau | None = None,
 ) -> int:
-    _training_module_for_state_dict(model).load_state_dict(
-        _normalize_state_dict(raw["state_dict"]), strict=True
-    )
+    load_training_module_state_dict(model, raw["state_dict"])
     optimizer.load_state_dict(raw["optimizer"])
     if ema_model is not None and "ema_state_dict" in raw:
         ema_model.load_state_dict(raw["ema_state_dict"], strict=True)
@@ -259,10 +291,14 @@ def _restore(
     if early_stop is not None:
         saved_early_stop = raw.get("early_stop", {})
         early_stop.best_score = float(saved_early_stop.get("best_score", -1.0))
+        early_stop.plateau_score = float(
+            saved_early_stop.get("plateau_score", early_stop.best_score)
+        )
         early_stop.patience_counter = int(
             saved_early_stop.get("patience_counter", 0)
         )
         early_stop.evaluations = int(saved_early_stop.get("evaluations", 0))
+        early_stop.psnr_at_best = float(saved_early_stop.get("psnr_at_best", -1.0))
     if lr_scheduler is not None and "lr_scheduler" in raw:
         lr_scheduler.load_state_dict(raw["lr_scheduler"])
     return int(raw.get("step", 0))
@@ -284,19 +320,6 @@ def _update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
             ema_model.buffers(), model.buffers(), strict=True
         ):
             ema_buffer.copy_(buffer)
-
-
-def _average_bn_stats(model: nn.Module, world_size: int) -> None:
-    """Make recalibrated BN buffers identical before deploy fusion and DDP."""
-    if world_size <= 1:
-        return
-    for module in model.modules():
-        if not isinstance(module, nn.modules.batchnorm._BatchNorm):
-            continue
-        for value in (module.running_mean, module.running_var):
-            if value is not None:
-                dist.all_reduce(value, op=dist.ReduceOp.SUM)
-                value.div_(world_size)
 
 
 def _train_config(args: argparse.Namespace, max_steps: int) -> TrainConfig:
@@ -345,7 +368,7 @@ def _validation_config(
         colorspace=resolve_colorspace(args),
         data_preview=data_preview and not args.no_data_preview,
         final_preview=final_preview,
-        compute_vmaf=extended and not args.no_vmaf,
+        compute_vmaf=args.val_metric == "vmaf",
         vmaf_model=args.vmaf_model,
     )
 
@@ -362,8 +385,8 @@ def _phase_hooks(
     early_stop: EarlyStopState | None = None,
     lr_scheduler: optim.lr_scheduler.ReduceLROnPlateau | None = None,
 ) -> TrainHooks:
-    def loss_fn(module, lr, hr):
-        return criterion(module(lr), hr)
+    def objective(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return criterion(prediction, target)
 
     def save(path: Path, step: int) -> None:
         save_checkpoint_dict(
@@ -385,7 +408,7 @@ def _phase_hooks(
             lr_scheduler.step(result.score)
 
     return TrainHooks(
-        loss_fn=loss_fn,
+        objective=objective,
         post_step=post_step,
         on_save_best=save,
         on_save_step=lambda step, path: save(path, step),
@@ -403,6 +426,8 @@ def _close_loader(loader) -> None:
 def main() -> None:
     args = resolve_training_args(resolve_model_args(parse_args()))
     validate_training_args(args)
+    if args.val_metric == "vmaf":
+        resolve_vmaf_binary()
     resume_raw: dict | None = None
 
     with distributed_session() as ctx:
@@ -424,8 +449,7 @@ def main() -> None:
                     model,
                     ctx,
                     compile_model=args.compile,
-                    sync_bn=SyncBnPolicy.IF_FLAG,
-                    sync_bn_flag=args.sync_bn,
+                    sync_bn=args.sync_bn,
                 )
                 optimizer = optim.Adam(model.parameters(), lr=args.float_lr, betas=(0.9, 0.999))
                 train_accel = build_train_accel(args)
@@ -491,25 +515,28 @@ def main() -> None:
             else:
                 base_model = build_model(args, ctx.device)
 
-            args.patch_size = args.qat_patch_size
             args.batch_size = args.qat_batch_size
 
-            if resume_phase == FLOAT:
-                recal_bundle = session.build_loaders(train_aug=False)
-                bn_recalibrate(
-                    base_model,
-                    recal_bundle.train,
-                    ctx.device,
-                    batches=args.bn_batches,
-                )
-                _average_bn_stats(base_model, ctx.world_size)
-                _close_loader(recal_bundle.train)
-                del recal_bundle
-                ctx.barrier()
-
+            lr_h, lr_w = args.lr_size
             example_inputs = (
-                torch.randn(1, 3, args.qat_patch_size, args.qat_patch_size).to(ctx.device),
+                torch.randn(
+                    1,
+                    base_model.core_in_channels,
+                    lr_h // args.phase_factor,
+                    lr_w // args.phase_factor,
+                    device=ctx.device,
+                ),
             )
+            if args.codec_context:
+                example_inputs += (
+                    torch.randn(
+                        1,
+                        base_model.codec_feature_channels,
+                        ((lr_h + 15) // 16) * 2,
+                        ((lr_w + 15) // 16) * 2,
+                        device=ctx.device,
+                    ),
+                )
             qat_model = prepare_model_for_qat(
                 base_model,
                 backend=args.backend,
@@ -560,9 +587,9 @@ def main() -> None:
                 resume_early_stop = None
                 resume_lr_scheduler = None
 
-            def post_step(module: nn.Module) -> None:
-                _weight_clip(module, args.clip_min, args.clip_max)
-                _update_ema(ema_model, module, args.ema_decay)
+            def post_step() -> None:
+                _weight_clip(train_model, args.clip_min, args.clip_max)
+                _update_ema(ema_model, train_model, args.ema_decay)
 
             loaders = session.build_loaders()
             if resume_phase != QAT_STABLE:
@@ -669,6 +696,17 @@ def main() -> None:
             if ctx.is_main:
                 torch.save(ema_model.state_dict(), session.save_dir / "last_ema.pth")
                 try:
+                    best_qat = session.save_dir / "best.pth"
+                    if best_qat.is_file():
+                        best_raw = torch.load(
+                            best_qat,
+                            map_location=ctx.device,
+                            weights_only=False,
+                        )
+                        load_training_module_state_dict(
+                            train_model,
+                            best_raw["state_dict"],
+                        )
                     quantized = convert_qat_model(train_model)
                     torch.save(
                         quantized.state_dict(),

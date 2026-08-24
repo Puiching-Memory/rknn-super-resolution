@@ -207,13 +207,43 @@ def infer_rknn_rgb(
     *,
     phase_factor: int = 2,
     scale: int = 3,
+    codec_feature_channels: int = 0,
+    codec_feature: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Run a YCbCr444 RKNN model and return its output in RGB."""
+    """Combine an RGA-bicubic reference with RKNN phase residuals."""
     ycbcr = np.rint(rgb_to_mlvc_ycbcr(lr_rgb)).astype(np.uint8)
+    base = resize_bicubic_hwc(ycbcr, scale)
     packed = pixel_unshuffle_hwc_to_nchw(ycbcr, phase_factor)
-    outputs = runtime.inference(inputs=[packed], data_format="nchw")
-    unpacked = pixel_shuffle_nchw_to_hwc(outputs[0], scale * phase_factor)
-    return mlvc_ycbcr_to_rgb(np.clip(unpacked, 0.0, 255.0))
+    inputs = [packed]
+    if codec_feature_channels:
+        codec_h = ((ycbcr.shape[0] + 15) // 16) * 2
+        codec_w = ((ycbcr.shape[1] + 15) // 16) * 2
+        if codec_feature is None:
+            codec_feature = np.zeros(
+                (1, codec_feature_channels, codec_h, codec_w), dtype=np.float32
+            )
+        inputs.append(np.asarray(codec_feature, dtype=np.float32))
+    outputs = runtime.inference(inputs=inputs, data_format="nchw")
+    residual = pixel_shuffle_nchw_to_hwc(outputs[0], scale * phase_factor)
+    return mlvc_ycbcr_to_rgb(np.clip(base + residual, 0.0, 255.0))
+
+
+def resize_bicubic_hwc(image: np.ndarray, scale: int) -> np.ndarray:
+    """OpenCV reference for the board-side RGA bicubic base path."""
+    if cv2 is None:
+        raise ImportError("opencv-python is required for RKNN bicubic reconstruction.")
+    if scale < 1:
+        raise ValueError("scale must be positive")
+    height, width = image.shape[:2]
+    return np.clip(
+        cv2.resize(
+            image.astype(np.float32),
+            (width * scale, height * scale),
+            interpolation=cv2.INTER_CUBIC,
+        ),
+        0.0,
+        255.0,
+    )
 
 
 def pixel_unshuffle_hwc_to_nchw(image: np.ndarray, factor: int) -> np.ndarray:
@@ -249,44 +279,37 @@ def pixel_shuffle_nchw_to_hwc(phases: np.ndarray, factor: int) -> np.ndarray:
     )
 
 
-def _normalize_state_dict(state_dict: dict) -> dict:
-    """Strip DDP ``module.`` and ``torch.compile`` ``_orig_mod.`` prefixes."""
-    normalized: dict = {}
-    for key, value in state_dict.items():
-        name = key.removeprefix("_orig_mod.").removeprefix("module.")
-        normalized[name] = value
-    return normalized
-
-
 def load_fp32_predictor(
     weight: Path,
     *,
     scale: int,
     num_channels: int,
     num_blocks: int,
-    num_conv_branches: int,
     device: str,
     phase_factor: int = 2,
-    output_kernel_size: int = 3,
+    codec_feature_channels: int = 96,
+    codec_project_channels: int = 16,
+    codec_upsample_factor: int = 4,
 ):
     import torch
 
-    from rk3588_mobile_sr.models import MobileOneSR
+    from rk3588_mobile_sr.models import PhaseRLFNSR
 
     dev = torch.device(device)
-    model = MobileOneSR(
+    model = PhaseRLFNSR(
         scale=scale,
         num_channels=num_channels,
         num_blocks=num_blocks,
-        num_conv_branches=num_conv_branches,
         phase_factor=phase_factor,
-        output_kernel_size=output_kernel_size,
+        codec_feature_channels=codec_feature_channels,
+        codec_project_channels=codec_project_channels,
+        codec_upsample_factor=codec_upsample_factor,
     ).to(dev)
     raw = torch.load(weight, map_location=dev, weights_only=False)
     if isinstance(raw, dict) and "state_dict" in raw:
-        state_dict = _normalize_state_dict(raw["state_dict"])
+        state_dict = raw["state_dict"]
     elif isinstance(raw, dict):
-        state_dict = _normalize_state_dict(raw)
+        state_dict = raw
     else:
         raise TypeError(f"Unsupported checkpoint format in {weight}")
     model.load_state_dict(state_dict)
@@ -313,6 +336,7 @@ def evaluate_accuracy(
     quant_mode: str,
     phase_factor: int = 2,
     scale: int = 3,
+    codec_feature_channels: int = 0,
 ) -> AccuracyReport:
     if not pairs:
         raise ValueError("No validation images found for RKNN accuracy eval.")
@@ -330,6 +354,7 @@ def evaluate_accuracy(
             pair.lr_rgb,
             phase_factor=phase_factor,
             scale=scale,
+            codec_feature_channels=codec_feature_channels,
         )
         rknn_psnrs.append(psnr_numpy(sr_rknn, pair.hr_rgb))
         rknn_ssims.append(ssim_numpy(sr_rknn, pair.hr_rgb))
@@ -411,15 +436,16 @@ def format_accuracy_table(report: AccuracyReport) -> str:
 def add_eval_args(parser: argparse.ArgumentParser, model_config=None) -> None:
     scale = getattr(model_config, "scale", 3)
     num_channels = getattr(model_config, "num_channels", 32)
-    num_blocks = getattr(model_config, "num_blocks", 6)
+    num_blocks = getattr(model_config, "num_blocks", 4)
     phase_factor = getattr(model_config, "phase_factor", 2)
-    output_kernel_size = getattr(model_config, "output_kernel_size", 3)
-    num_conv_branches = getattr(model_config, "num_conv_branches", 4)
+    codec_feature_channels = getattr(model_config, "codec_feature_channels", 96)
+    codec_project_channels = getattr(model_config, "codec_project_channels", 16)
+    codec_upsample_factor = getattr(model_config, "codec_upsample_factor", 4)
     parser.add_argument(
         "--eval",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run FP32 vs RKNN PSNR/SSIM comparison after build (default: on).",
+        default=False,
+        help="Run SR-fallback FP32 vs RKNN PSNR/SSIM comparison after build.",
     )
     parser.add_argument(
         "--weight",
@@ -433,10 +459,9 @@ def add_eval_args(parser: argparse.ArgumentParser, model_config=None) -> None:
     parser.add_argument("--num_channels", type=int, default=num_channels)
     parser.add_argument("--num_blocks", type=int, default=num_blocks)
     parser.add_argument("--phase_factor", type=int, default=phase_factor)
-    parser.add_argument(
-        "--output_kernel_size", type=int, choices=[1, 3], default=output_kernel_size
-    )
-    parser.add_argument("--num_conv_branches", type=int, default=num_conv_branches)
+    parser.add_argument("--codec_feature_channels", type=int, default=codec_feature_channels)
+    parser.add_argument("--codec_project_channels", type=int, default=codec_project_channels)
+    parser.add_argument("--codec_upsample_factor", type=int, default=codec_upsample_factor)
     parser.add_argument("--eval_device", type=str, default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--max_images", type=int, default=100)
     parser.add_argument(
@@ -460,9 +485,14 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         print(f"--> Eval skipped: HR directory not found: {hr_dir}")
         return
 
-    _, input_h, input_w = [int(x.strip()) for x in args.input_size.split(",")]
+    size_specs = [
+        [int(x.strip()) for x in item.split(",")]
+        for item in args.input_size.split(";")
+    ]
+    _input_channels, input_h, input_w = size_specs[0]
     input_h *= args.phase_factor
     input_w *= args.phase_factor
+    runtime_codec_channels = size_specs[1][0] if len(size_specs) > 1 else 0
 
     fp32_predictor = None
     if args.weight:
@@ -472,9 +502,10 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
                 scale=args.scale,
                 num_channels=args.num_channels,
                 num_blocks=args.num_blocks,
-                num_conv_branches=args.num_conv_branches,
                 phase_factor=args.phase_factor,
-                output_kernel_size=args.output_kernel_size,
+                codec_feature_channels=args.codec_feature_channels,
+                codec_project_channels=args.codec_project_channels,
+                codec_upsample_factor=args.codec_upsample_factor,
                 device=args.eval_device,
             )
         except (ImportError, ModuleNotFoundError) as exc:
@@ -497,6 +528,7 @@ def run_post_build_eval(args: argparse.Namespace, runtime: _RknnRuntime, *, quan
         quant_mode=quant_mode,
         phase_factor=args.phase_factor,
         scale=args.scale,
+        codec_feature_channels=runtime_codec_channels,
     )
     print()
     print(format_accuracy_table(report))

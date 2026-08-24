@@ -1,134 +1,56 @@
-"""QAT helpers: fuse, prepare, convert for RK3588 deploy graph."""
+"""QAT helpers for the integer Phase-RLFN residual core."""
 
-from typing import Any
+from __future__ import annotations
+
+import copy
 
 import torch
-import torch.nn as nn
-from torch.ao.quantization import (
-    QConfigMapping,
-    default_observer,
-    default_weight_observer,
-    get_default_qat_qconfig,
-)
+from torch.ao.quantization import QConfigMapping, get_default_qat_qconfig
 from torch.ao.quantization.quantize_fx import convert_fx, prepare_qat_fx
 
-from .mobileone_sr import MobileOneSR
+from .phase_rlfn_sr import PhaseRLFNSR
 
 
-def fuse_stem(model: MobileOneSR) -> MobileOneSR:
-    """Fuse stem Conv+BN+activation into Conv+activation for FX QAT."""
-    conv, bn, relu = model.stem[0], model.stem[1], model.stem[2]
-    std = (bn.running_var + bn.eps).sqrt()
-    weight = conv.weight * (bn.weight / std).view(-1, 1, 1, 1)
-    bias = bn.bias - bn.running_mean * bn.weight / std
-    if conv.bias is not None:
-        bias = bias + conv.bias
-
-    fused = nn.Conv2d(
-        conv.in_channels,
-        conv.out_channels,
-        kernel_size=conv.kernel_size,
-        stride=conv.stride,
-        padding=conv.padding,
-        bias=True,
-    )
-    fused.weight.data = weight
-    fused.bias.data = bias
-    model.stem = nn.Sequential(fused, relu)
-    return model
-
-
-def get_qconfig(backend: str = "qnnpack", act_quant_min: int = 0, act_quant_max: int = 255):
-    """Build a QAT qconfig tuned for [0,255] images."""
-    if backend == "qnnpack":
-        return get_default_qat_qconfig("qnnpack")
-
-    act_observer = default_observer.with_args(quant_min=act_quant_min, quant_max=act_quant_max)
-    weight_observer = default_weight_observer
-    qconfig = torch.ao.quantization.QConfig(
-        activation=act_observer,
-        weight=weight_observer,
-    )
-    return qconfig
+def get_qconfig(backend: str = "qnnpack"):
+    """Return the backend QAT configuration used by the exported core."""
+    return get_default_qat_qconfig(backend)
 
 
 def prepare_model_for_qat(
-    model: MobileOneSR,
+    model: PhaseRLFNSR,
     backend: str = "qnnpack",
-    example_inputs: tuple[torch.Tensor, ...] = None,
-) -> torch.fx.GraphModule:
-    """Switch to deploy, fuse stem, then prepare FX QAT."""
+    example_inputs: tuple[torch.Tensor, ...] | None = None,
+) -> PhaseRLFNSR:
+    """Prepare only the NPU residual core, leaving RGA bicubic in float."""
     model.switch_to_deploy()
-    model = fuse_stem(model)
     model.train()
-
-    qconfig = get_qconfig(backend)
-    qconfig_mapping = QConfigMapping().set_global(qconfig)
-
     if example_inputs is None:
-        example_inputs = (torch.randn(1, 3, 360, 640),)
-
-    prepared = prepare_qat_fx(model, qconfig_mapping, example_inputs)
-    return prepared
-
-
-def convert_qat_model(prepared_model: torch.fx.GraphModule) -> torch.fx.GraphModule:
-    """Convert a prepared QAT model to quantized (int8) model."""
-    prepared_model.eval()
-    return convert_fx(prepared_model)
-
-
-def bn_recalibrate(model: nn.Module, loader: Any, device: torch.device, batches: int = 64) -> None:
-    """Forward-only mini-batch recalibration of BN running statistics."""
-    model.train()
-    with torch.no_grad():
-        for idx, batch in enumerate(loader):
-            if idx >= batches:
-                break
-            wait_ready = getattr(batch, "wait_ready", None)
-            if wait_ready is not None:
-                wait_ready()
-            lr, _ = batch
-            lr = lr.to(device)
-            _ = model(lr)
-
-
-def _filter_qat_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Keep only float conv/linear tensors from a prepared QAT state dict."""
-    return {
-        key: value
-        for key, value in state_dict.items()
-        if not any(
-            token in key
-            for token in ("fake_quant", "observer", "activation_post_process")
+        example_inputs = (
+            torch.randn(1, model.core_in_channels, 180, 320),
+            torch.randn(1, model.codec_feature_channels, 46, 80),
         )
-    }
-
-
-def load_deploy_float_from_qat_checkpoint(
-    model: MobileOneSR,
-    state_dict: dict[str, torch.Tensor],
-    *,
-    identity_var_floor: float = 0.0,
-) -> MobileOneSR:
-    """Load QAT weights into a fused deploy float graph for ONNX / RKNN export."""
-    model.switch_to_deploy(identity_var_floor=identity_var_floor)
-    model = fuse_stem(model)
-    filtered = _filter_qat_state_dict(state_dict)
-    model.load_state_dict(filtered, strict=True)
+    mapping = QConfigMapping().set_global(get_qconfig(backend))
+    model.core = prepare_qat_fx(model.core, mapping, example_inputs)
     return model
 
 
+def convert_qat_model(prepared_model: PhaseRLFNSR) -> PhaseRLFNSR:
+    """Convert a prepared model without quantizing bicubic/add/clip operations."""
+    quantized = copy.deepcopy(prepared_model).eval()
+    quantized.core = convert_fx(quantized.core)
+    return quantized
+
+
 def load_qat_checkpoint_for_export(
-    model: MobileOneSR,
+    model: PhaseRLFNSR,
     state_dict: dict[str, torch.Tensor],
     example_inputs: tuple[torch.Tensor, ...],
     backend: str = "qnnpack",
-) -> torch.fx.GraphModule:
-    """Load Stage-3 QAT weights into fused deploy graph for RKNN-friendly ONNX export."""
+) -> PhaseRLFNSR:
+    """Reconstruct the QAT core, load its state and disable fake quantization."""
     prepared = prepare_model_for_qat(model, backend=backend, example_inputs=example_inputs)
-    prepared.load_state_dict(state_dict, strict=False)
+    prepared.load_state_dict(state_dict, strict=True)
     prepared.eval()
-    torch.ao.quantization.disable_observer(prepared)
-    torch.ao.quantization.disable_fake_quant(prepared)
+    prepared.apply(torch.ao.quantization.disable_observer)
+    prepared.apply(torch.ao.quantization.disable_fake_quant)
     return prepared

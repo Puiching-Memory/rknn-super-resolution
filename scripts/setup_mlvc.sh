@@ -33,8 +33,7 @@ MLVC ready: $MLVC_ROOT @ $(git -C "$MLVC_ROOT" rev-parse --short HEAD)
 checkpoint: $CHECKPOINT
 sequence index: $SEQUENCE_CSV
 
-OpenVidHD frames are intentionally not downloaded by this script. Download parts 10-28
-from https://huggingface.co/datasets/nkp37/OpenVid-1M/tree/main/OpenVidHD, then run
-MLVC's video/extract_frame_sequences.py and video/build_dataset_description.py to create:
-  data/OpenVidHD/openvidhd_60k_train64/description.json
+OpenVidHD mp4s are intentionally not downloaded by this script. Place parts 10-28
+under data/OpenVidHD/ (for example data/OpenVidHD/part10/*.mp4). Training reads
+the CSV index and decodes source videos directly; do not extract WebP frames.
 EOF

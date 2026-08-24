@@ -9,7 +9,7 @@ cd "$ROOT"
 export NO_PROXY="swanlab.cn,.swanlab.cn,api.swanlab.cn,localhost,127.0.0.1,${NO_PROXY:-}"
 export no_proxy="$NO_PROXY"
 
-# Project-local Netflix libvmaf (VMAF v1) from ./scripts/setup_vmaf.sh
+# Project-local Netflix libvmaf (VMAF v1); built by hatch_build.py on `uv sync`.
 export PATH="$ROOT/.local/bin:${PATH:-}"
 export LD_LIBRARY_PATH="$ROOT/.local/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 
@@ -27,6 +27,19 @@ ensure_submodule() {
 
 run_uv() {
   uv run "$@"
+}
+
+ensure_vmaf() {
+  local bin="$ROOT/.local/bin/vmaf"
+  if [[ -x "$bin" ]]; then
+    return 0
+  fi
+  echo "libvmaf CLI missing at $bin; building via scripts/setup_vmaf.sh" >&2
+  if command -v meson >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1; then
+    "$ROOT/scripts/setup_vmaf.sh"
+    return
+  fi
+  uv run --with 'meson>=1.0' --with ninja -- bash "$ROOT/scripts/setup_vmaf.sh"
 }
 
 run_torchrun() {

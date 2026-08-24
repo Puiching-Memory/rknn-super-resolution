@@ -12,12 +12,12 @@ from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.data.prefetch import BatchPrefetcher
 from rk3588_mobile_sr.distributed.context import DistributedContext
-from rk3588_mobile_sr.distributed.model import unwrap_model
 from rk3588_mobile_sr.distributed.validation import (
     EarlyStopState,
     ValidationConfig,
     ValidationRunner,
 )
+from rk3588_mobile_sr.models import SRInput, forward_sr, split_sr_input
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.model_diagnostics import (
     ForwardDiagnosticsTracker,
@@ -30,7 +30,12 @@ from rk3588_mobile_sr.utils.swanlab_logging import (
     run_training_data_preview,
 )
 from rk3588_mobile_sr.utils.traceml_profiling import trace_training_step
-from rk3588_mobile_sr.utils.train_framework import TrainAccel, amp_autocast, run_backward
+from rk3588_mobile_sr.utils.train_framework import (
+    TrainAccel,
+    amp_autocast,
+    run_backward,
+    training_module_state_dict,
+)
 
 
 def _unwrap_dataloader(train_loader: DataLoader | object) -> DataLoader | object:
@@ -40,11 +45,15 @@ def _unwrap_dataloader(train_loader: DataLoader | object) -> DataLoader | object
 
 
 def _to_device(
-    lr: torch.Tensor, hr: torch.Tensor, device: torch.device
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if lr.device == device and hr.device == device:
-        return lr, hr
-    return lr.to(device, non_blocking=True), hr.to(device, non_blocking=True)
+    model_input: SRInput, hr: torch.Tensor, device: torch.device
+) -> tuple[SRInput, torch.Tensor]:
+    current, codec_feature = split_sr_input(model_input)
+    current = current.to(device, non_blocking=True)
+    if codec_feature is not None:
+        model_input = (current, codec_feature.to(device, non_blocking=True))
+    else:
+        model_input = current
+    return model_input, hr.to(device, non_blocking=True)
 
 
 def _format_component_detail(metrics: dict[str, float]) -> str:
@@ -92,7 +101,6 @@ class StepTrainer:
         self.early_stop = early_stop or EarlyStopState()
         self.model_diag = model_diag
         self.global_step = global_step
-        self.unwrap = unwrap_model(model)
 
     def _log_plan(self) -> None:
         if not self.ctx.is_main:
@@ -172,9 +180,9 @@ class StepTrainer:
         window_loss = 0.0
         window_components: dict[str, float] = defaultdict(float)
         local_steps = 0
-        pending_batch: tuple[torch.Tensor, torch.Tensor] | None = None
+        pending_batch: tuple[SRInput, torch.Tensor] | None = None
 
-        def _fetch_batch() -> tuple[torch.Tensor, torch.Tensor]:
+        def _fetch_batch() -> tuple[SRInput, torch.Tensor]:
             batch = next(prefetcher)
             if prefetch_stream is None:
                 wait_ready = getattr(batch, "wait_ready", None)
@@ -202,7 +210,8 @@ class StepTrainer:
                 with trace_training_step(self.model):
                     self.optimizer.zero_grad(set_to_none=True)
                     with amp_autocast(self.train_accel):
-                        loss_result = self.hooks.loss_fn(self.unwrap, lr, hr)
+                        prediction = forward_sr(self.model, lr)
+                        loss_result = self.hooks.objective(prediction, hr)
                     if isinstance(loss_result, tuple):
                         loss, step_metrics = loss_result
                         if isinstance(step_metrics, dict):
@@ -212,7 +221,7 @@ class StepTrainer:
                         loss = loss_result
                     run_backward(loss, self.optimizer, self.train_accel)
                     if self.hooks.post_step is not None:
-                        self.hooks.post_step(self.unwrap)
+                        self.hooks.post_step()
                     if self.hooks.scheduler is not None:
                         self.hooks.scheduler.step()
 
@@ -250,7 +259,7 @@ class StepTrainer:
                     if self.hooks.on_save_step is not None:
                         self.hooks.on_save_step(self.global_step, step_path)
                     else:
-                        torch.save(self.unwrap.state_dict(), step_path)
+                        torch.save(training_module_state_dict(self.model), step_path)
         finally:
             prefetcher.close()
             if diag_tracker is not None:
@@ -261,7 +270,7 @@ class StepTrainer:
             if self.hooks.on_save_last is not None:
                 self.hooks.on_save_last(self.global_step, last_path)
             else:
-                torch.save(self.unwrap.state_dict(), last_path)
+                torch.save(training_module_state_dict(self.model), last_path)
 
         if (
             self.ctx.is_main

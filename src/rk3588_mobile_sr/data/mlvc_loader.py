@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -13,17 +13,20 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from rk3588_mobile_sr.config import DataConfig
 from rk3588_mobile_sr.data.decode import FrameDecoder, TorchCodecFrameDecoder
-from rk3588_mobile_sr.data.mlvc_runtime import FrozenMLVCRuntime
+from rk3588_mobile_sr.data.mlvc_runtime import FrozenMLVCRuntime, MLVCReconstruction
 from rk3588_mobile_sr.data.openvid import (
     OpenVidSequenceDataset,
     collate_openvid_batch,
-    load_openvid_description,
+    load_openvid_index,
     split_sequence_indices,
 )
+from rk3588_mobile_sr.models import SRInput
 
 
 class MLVCRuntime(Protocol):
-    def reconstruct(self, sequence: torch.Tensor, q_index: torch.Tensor) -> torch.Tensor: ...
+    def reconstruct(
+        self, sequence: torch.Tensor, q_index: torch.Tensor
+    ) -> MLVCReconstruction: ...
 
 
 def rgb_to_mlvc_ycbcr(rgb: torch.Tensor) -> torch.Tensor:
@@ -44,6 +47,13 @@ def mlvc_ycbcr_to_rgb(ycbcr: torch.Tensor) -> torch.Tensor:
     return torch.cat((r, g, b), dim=-3).clamp_(0.0, 1.0)
 
 
+def _map_time(frames: torch.Tensor, fn: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
+    """Apply an NCHW color transform across a ``B x T x C x H x W`` clip."""
+    batch, time, channels, height, width = frames.shape
+    mapped = fn(frames.reshape(batch * time, channels, height, width))
+    return mapped.reshape(batch, time, *mapped.shape[1:])
+
+
 class MLVCBatchProcessor:
     def __init__(
         self,
@@ -53,35 +63,45 @@ class MLVCBatchProcessor:
         device: torch.device,
         q_indices: tuple[int, ...],
         colorspace: str,
-        patch_size: int | None,
         scale: int,
+        codec_context: bool = False,
+        codec_dropout: float = 0.25,
     ) -> None:
         if not q_indices or any(q < 0 or q >= 64 for q in q_indices):
             raise ValueError("q_indices must contain values in [0, 63]")
         if colorspace not in ("rgb", "yuv"):
             raise ValueError("colorspace must be 'rgb' or 'yuv'")
+        if scale < 1:
+            raise ValueError("scale must be positive")
+        if not 0.0 <= codec_dropout <= 1.0:
+            raise ValueError("codec_dropout must be in [0, 1]")
         self.runtime = runtime
         self.decoder = decoder
         self.device = device
         self.q_indices = q_indices
         self.colorspace = colorspace
-        self.patch_size = patch_size
         self.scale = scale
+        self.codec_context = codec_context
+        self.codec_dropout = codec_dropout
 
     def __call__(
         self,
         batch: dict[str, Any],
         *,
         training: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[SRInput, torch.Tensor]:
         sequence_u8, hr_u8 = self.decoder.decode_batch(batch)
+        if sequence_u8.ndim != 5 or hr_u8.ndim != 5:
+            raise ValueError("decoded clips must be BxTx3xHxW")
         sequence = sequence_u8.to(self.device, non_blocking=True).float().div_(255.0)
         hr_rgb = hr_u8.to(self.device, non_blocking=True).float().div_(255.0)
-        b, t, c, h, w = sequence.shape
-        sequence_yuv = rgb_to_mlvc_ycbcr(sequence.reshape(b * t, c, h, w)).reshape(
-            b, t, c, h, w
-        )
+        b, t, c, height, width = sequence.shape
+        if hr_rgb.shape[:3] != (b, t, c):
+            raise ValueError("LR and HR clips must share batch, time and channel layout")
+        if hr_rgb.shape[-2:] != (height * self.scale, width * self.scale):
+            raise ValueError("MLVC LR and OpenVidHD HR canvases are not scale-aligned")
 
+        sequence_yuv = _map_time(sequence, rgb_to_mlvc_ycbcr)
         if training:
             choices = torch.tensor(self.q_indices, device=self.device)
             offsets = torch.randint(len(self.q_indices), (b,), device=self.device)
@@ -89,60 +109,59 @@ class MLVCBatchProcessor:
         else:
             q_index = batch["q_index"].to(self.device, non_blocking=True)
 
-        lr_yuv = self.runtime.reconstruct(sequence_yuv, q_index)
-        hr_yuv = rgb_to_mlvc_ycbcr(hr_rgb)
+        reconstruction = self.runtime.reconstruct(sequence_yuv, q_index)
+        lr_yuv = reconstruction.frames
+        codec_feature = reconstruction.features
+        if lr_yuv.ndim != 5 or lr_yuv.shape[1] != t - 1:
+            raise ValueError("MLVC reconstruct must return Bx(T-1)x3xHxW P-frames")
+        hr_p = hr_rgb[:, 1:]
         if self.colorspace == "rgb":
-            lr = mlvc_ycbcr_to_rgb(lr_yuv)
-            hr = hr_rgb
+            lr = _map_time(lr_yuv, mlvc_ycbcr_to_rgb)
+            hr = hr_p
         else:
             lr = lr_yuv
-            hr = hr_yuv
+            hr = _map_time(hr_p, rgb_to_mlvc_ycbcr)
         lr = lr.mul(255.0)
         hr = hr.mul(255.0)
-
-        if self.patch_size is not None:
-            lr, hr = self._random_crop(lr, hr)
-        return lr.contiguous(), hr.contiguous()
-
-    def _random_crop(
-        self,
-        lr: torch.Tensor,
-        hr: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        patch = self.patch_size
-        assert patch is not None
-        if hr.shape[-2:] != (lr.shape[-2] * self.scale, lr.shape[-1] * self.scale):
-            raise ValueError("MLVC LR and OpenVidHD HR canvases are not scale-aligned")
-        if patch > lr.shape[-2] or patch > lr.shape[-1]:
-            raise ValueError(f"patch_size {patch} exceeds LR canvas {tuple(lr.shape[-2:])}")
-        lr_out: list[torch.Tensor] = []
-        hr_out: list[torch.Tensor] = []
-        for index in range(lr.shape[0]):
-            top = int(torch.randint(lr.shape[-2] - patch + 1, (), device=lr.device))
-            left = int(torch.randint(lr.shape[-1] - patch + 1, (), device=lr.device))
-            lr_out.append(lr[index, :, top : top + patch, left : left + patch])
-            hr_top, hr_left = top * self.scale, left * self.scale
-            hr_patch = patch * self.scale
-            hr_out.append(
-                hr[index, :, hr_top : hr_top + hr_patch, hr_left : hr_left + hr_patch]
-            )
-        return torch.stack(lr_out), torch.stack(hr_out)
+        if training and self.codec_dropout > 0.0:
+            disabled = torch.rand(
+                codec_feature.shape[0],
+                codec_feature.shape[1],
+                1,
+                1,
+                1,
+                device=codec_feature.device,
+            ) < self.codec_dropout
+            codec_feature = torch.where(disabled, torch.zeros_like(codec_feature), codec_feature)
+        if training:
+            current = lr.flatten(0, 1).contiguous()
+            target = hr.flatten(0, 1).contiguous()
+            if not self.codec_context:
+                return current, target
+            codec = codec_feature.flatten(0, 1).contiguous()
+            return (current, codec), target
+        current = lr[:, -1].contiguous()
+        target = hr[:, -1].contiguous()
+        if not self.codec_context:
+            return current, target
+        return (current, codec_feature[:, -1].contiguous()), target
 
 
 @dataclass
 class MLVCDeviceBatch:
-    lr: torch.Tensor
+    lr: SRInput
     hr: torch.Tensor
     ready_event: torch.cuda.Event | None = None
 
-    def __iter__(self) -> Iterator[torch.Tensor]:
+    def __iter__(self) -> Iterator[object]:
         yield self.lr
         yield self.hr
 
     def wait_ready(self, stream: torch.cuda.Stream | None = None) -> None:
         if self.ready_event is None:
             return
-        consumer = stream or torch.cuda.current_stream(self.lr.device)
+        current = self.lr if isinstance(self.lr, torch.Tensor) else self.lr[0]
+        consumer = stream or torch.cuda.current_stream(current.device)
         consumer.wait_event(self.ready_event)
 
 
@@ -173,9 +192,10 @@ class _InfiniteMLVCIterator(Iterator[MLVCDeviceBatch]):
             batch = next(self.iterator)
         lr, hr = self.processor(batch, training=True)
         ready_event = None
-        if lr.device.type == "cuda":
+        current = lr if isinstance(lr, torch.Tensor) else lr[0]
+        if current.device.type == "cuda":
             ready_event = torch.cuda.Event()
-            ready_event.record(torch.cuda.current_stream(lr.device))
+            ready_event.record(torch.cuda.current_stream(current.device))
         return MLVCDeviceBatch(lr, hr, ready_event)
 
     def close(self) -> None:
@@ -209,7 +229,7 @@ class MLVCValidationLoader:
         self.dataset = loader.dataset
         self.sampler = loader.sampler
 
-    def __iter__(self) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    def __iter__(self) -> Iterator[tuple[SRInput, torch.Tensor]]:
         for batch in self.loader:
             yield self.processor(batch, training=False)
 
@@ -227,7 +247,6 @@ def build_mlvc_loaders(
     *,
     device: torch.device,
     batch_size: int,
-    patch_size: int | None,
     scale: int,
     colorspace: str,
     train_aug: bool,
@@ -237,12 +256,13 @@ def build_mlvc_loaders(
     project_root: Path,
 ) -> tuple[MLVCTrainLoader, MLVCValidationLoader]:
     description = _resolve(data.dataset_description, project_root)
-    sequences = load_openvid_description(description)
+    video_root = _resolve(data.video_root, project_root) if data.video_root else description.parent
+    sequences = load_openvid_index(description, video_root=video_root)
     train_indices, val_indices = split_sequence_indices(
         len(sequences), val_fraction=data.val_fraction, seed=data.split_seed
     )
     train_dataset = OpenVidSequenceDataset(
-        description,
+        sequences,
         indices=train_indices,
         sequence_frames=data.sequence_frames,
         lr_size=data.lr_size,
@@ -252,7 +272,7 @@ def build_mlvc_loaders(
     )
     val_base_count = max(1, data.val_samples // len(data.q_indices))
     val_dataset = OpenVidSequenceDataset(
-        description,
+        sequences,
         indices=val_indices,
         sequence_frames=data.sequence_frames,
         lr_size=data.lr_size,
@@ -313,26 +333,18 @@ def build_mlvc_loaders(
         lr_size=data.lr_size,
         hr_size=data.hr_size,
     )
-    train_processor = MLVCBatchProcessor(
+    processor = MLVCBatchProcessor(
         runtime,
         decoder=decoder,
         device=device,
         q_indices=data.q_indices,
         colorspace=colorspace,
-        patch_size=patch_size,
         scale=scale,
+        codec_context=data.codec_context,
+        codec_dropout=data.codec_dropout,
     )
-    val_processor = MLVCBatchProcessor(
-        runtime,
-        decoder=decoder,
-        device=device,
-        q_indices=data.q_indices,
-        colorspace=colorspace,
-        patch_size=None,
-        scale=scale,
-    )
-    train_iterator = _InfiniteMLVCIterator(train_cpu_loader, train_processor, train_sampler)
+    train_iterator = _InfiniteMLVCIterator(train_cpu_loader, processor, train_sampler)
     return (
         MLVCTrainLoader(train_iterator, decoder),
-        MLVCValidationLoader(val_cpu_loader, val_processor),
+        MLVCValidationLoader(val_cpu_loader, processor),
     )

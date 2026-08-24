@@ -14,6 +14,8 @@ from rk3588_mobile_sr.config import default_config_path
 from rk3588_mobile_sr.data.yuv_utils import rgb_to_yuv444
 from rk3588_mobile_sr.utils.swanlab_logging import (
     _looks_like_local_run_suffix,
+    build_swanlab_run_config,
+    collect_data_preview_samples,
     collect_sr_validation_panels,
     find_swanlab_run_id,
     load_swanlab_run_record,
@@ -56,6 +58,41 @@ def test_make_data_preview_panel_includes_roundtrip_column():
     hr[2] = 45.0
     panel = make_data_preview_panel(lr, hr, colorspace="yuv")
     assert panel.shape == (72, 36 * 3, 3)
+
+
+def test_collect_data_preview_forwards_train_colorspace(monkeypatch):
+    seen: dict[str, str] = {}
+
+    def fake_panel(lr, hr, *, colorspace="yuv", **kwargs):
+        seen["colorspace"] = colorspace
+        return np.zeros((8, 24, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(
+        "rk3588_mobile_sr.utils.swanlab_logging.make_data_preview_panel",
+        fake_panel,
+    )
+    rgb = torch.zeros(1, 3, 8, 8)
+    collect_data_preview_samples(iter([(rgb, rgb)]), num_samples=1, colorspace="yuv")
+    assert seen["colorspace"] == "yuv"
+
+
+def test_build_swanlab_run_config_omits_nones_and_records_vmaf_v1():
+    args = argparse.Namespace(
+        vmaf_model="1080p",
+        colorspace="yuv",
+        q_indices=[0, 21, 42, 63],
+        resume=None,
+        num_workers=4,
+    )
+    config = build_swanlab_run_config(args, world_size=2)
+    assert "resume" not in config
+    assert config["colorspace"] == "yuv"
+    assert config["q_indices"] == [0, 21, 42, 63]
+    assert config["vmaf_family"] == "v1"
+    assert config["vmaf_model_id"] == "vmaf_v1.0.16_3d0h"
+    assert config["vmaf_enc_size"] == [360, 640]
+    assert config["world_size"] == 2
+    assert not any(value == {} for value in config.values())
 
 
 def test_rgb_diff_stats_zero_for_identical_images():

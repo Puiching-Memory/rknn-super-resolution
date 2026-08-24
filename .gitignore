@@ -99,7 +99,7 @@ data/scaled_cache/
 # Experiment tracking
 wandb/
 
-# Local Netflix libvmaf prefix (see ./scripts/setup_vmaf.sh)
+# Local Netflix libvmaf prefix (uv sync / ./scripts/setup_vmaf.sh)
 .local/
 
 # OS files

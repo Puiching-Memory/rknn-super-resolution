@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.data.yuv_utils import colorspace_roundtrip_rgb
+from rk3588_mobile_sr.models import SRInput, forward_sr, split_sr_input
 from rk3588_mobile_sr.utils.run_logger import logger
 from rk3588_mobile_sr.utils.sr_metrics import iter_val_batches
 
@@ -198,6 +199,48 @@ def resolve_swanlab_run_id(
         project=project,
         experiment_name=experiment_name,
     )
+
+
+def _jsonable_config_value(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_jsonable_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_jsonable_config_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable_config_value(item) for key, item in value.items()}
+    return value
+
+
+def build_swanlab_run_config(
+    args: Any,
+    *,
+    world_size: int,
+    vmaf_enc_size: tuple[int, int] | None = (360, 640),
+) -> dict[str, Any]:
+    """Resolved training config for SwanLab (no argparse ``None`` → ``{}`` holes)."""
+    from rk3588_mobile_sr.utils.vmaf_metric import resolved_vmaf_model_id
+
+    config: dict[str, Any] = {}
+    for key, value in vars(args).items():
+        if value is None:
+            continue
+        config[key] = _jsonable_config_value(value)
+    model = str(getattr(args, "vmaf_model", "1080p"))
+    config["vmaf_family"] = "v1"
+    config["vmaf_model_alias"] = model
+    config["vmaf_model_id"] = resolved_vmaf_model_id(model)
+    if vmaf_enc_size is not None:
+        config["vmaf_enc_size"] = [int(vmaf_enc_size[0]), int(vmaf_enc_size[1])]
+        config["vmaf_enc_size_note"] = (
+            "CAMBI encode size only; VMAF scores full-resolution frames"
+        )
+    config["world_size"] = int(world_size)
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if visible:
+        config["cuda_visible_devices"] = visible
+    return config
 
 
 def setup_swanlab(
@@ -431,7 +474,7 @@ def make_sr_panel(
     zoom_scale: int = 4,
     include_detail: bool = True,
 ) -> np.ndarray:
-    """Build an MLVC LR | MobileOneSR | HR panel with an optional error row."""
+    """Build an MLVC LR | Phase-RLFN | HR panel with an optional error row."""
     hr_hw = hr.shape[-2:]
     lr_up = upscale_lr_canvas(lr, hr_hw)
     lr_np = chw_tensor_to_uint8_hwc(lr_up)
@@ -543,14 +586,15 @@ def collect_data_preview_samples(
         return []
 
     samples: list[DataPreviewSample] = []
-    for lr, hr in val_loader:
+    for model_input, hr in val_loader:
+        lr, _codec_feature = split_sr_input(model_input)
         for offset in range(lr.shape[0]):
-            lr_rgb = colorspace_to_rgb(lr[offset], colorspace)
+            lr_rgb = colorspace_to_rgb(lr[offset, :3], colorspace)
             hr_rgb = colorspace_to_rgb(hr[offset], colorspace)
             panel = make_data_preview_panel(
                 lr_rgb,
                 hr_rgb,
-                colorspace="rgb",
+                colorspace=colorspace,
                 error_gain=error_gain,
             )
             lr_np = chw_tensor_to_uint8_hwc(upscale_lr_canvas(lr_rgb, hr_rgb.shape[-2:]))
@@ -584,6 +628,7 @@ def log_data_preview_samples(
     step: int = 0,
     max_size: int = 768,
     save_dir: Path | None = None,
+    colorspace: str = "yuv",
 ) -> dict[str, float]:
     """Upload frozen-MLVC input previews and aggregate degradation metrics."""
     if not samples:
@@ -608,7 +653,7 @@ def log_data_preview_samples(
         for sample in samples:
             payload[f"data_preview/sample_{sample.index:03d}"] = swanlab.Image(
                 sample.panel,
-                caption=data_preview_caption(colorspace="rgb"),
+                caption=data_preview_caption(colorspace=colorspace),
                 size=max_size,
             )
         swanlab.log(payload, step=step)
@@ -639,6 +684,7 @@ def run_training_data_preview(
         step=step,
         max_size=max_size,
         save_dir=save_dir,
+        colorspace=colorspace,
     )
     if metrics:
         logger.info(
@@ -653,7 +699,7 @@ def run_training_data_preview(
 @torch.no_grad()
 def collect_sr_validation_panels(
     model: nn.Module,
-    val_loader: Iterator[tuple[torch.Tensor, torch.Tensor]],
+    val_loader: Iterator[tuple[SRInput, torch.Tensor]],
     device: torch.device,
     *,
     num_samples: int = 4,
@@ -661,7 +707,7 @@ def collect_sr_validation_panels(
     include_detail: bool = True,
     colorspace: str = "rgb",
 ) -> list[np.ndarray]:
-    """Collect MobileOneSR panels from processed MLVC validation batches."""
+    """Collect Phase-RLFN panels from processed MLVC validation batches."""
     if num_samples <= 0:
         return []
 
@@ -670,12 +716,17 @@ def collect_sr_validation_panels(
     unwrap.eval()
 
     panels: list[np.ndarray] = []
-    for lr, hr in val_loader:
+    for model_input, hr in val_loader:
+        lr, codec_feature = split_sr_input(model_input)
         lr = lr.to(device, non_blocking=True)
+        if codec_feature is not None:
+            model_input = (lr, codec_feature.to(device, non_blocking=True))
+        else:
+            model_input = lr
         hr = hr.to(device, non_blocking=True)
-        sr = torch.clamp(unwrap(lr), 0.0, 255.0)
+        sr = torch.clamp(forward_sr(unwrap, model_input), 0.0, 255.0)
         for i in range(lr.shape[0]):
-            lr_rgb = colorspace_to_rgb(lr[i], colorspace)
+            lr_rgb = colorspace_to_rgb(lr[i, :3], colorspace)
             sr_rgb = colorspace_to_rgb(sr[i], colorspace)
             hr_rgb = colorspace_to_rgb(hr[i], colorspace)
             panels.append(
@@ -719,6 +770,7 @@ def log_sr_panels(
     include_detail: bool = True,
     save_dir: Path | None = None,
     save_subdir: str = "sr_preview",
+    colorspace: str | None = None,
 ) -> Path | None:
     """Upload generic SR panels to SwanLab."""
     preview_dir = (
@@ -734,7 +786,8 @@ def log_sr_panels(
         if include_detail
         else ""
     )
-    caption = f"MLVC LR (NN x3) | MobileOneSR | HR{detail_note}"
+    space = f" [{colorspace}]" if colorspace else ""
+    caption = f"MLVC LR (NN x3) | Phase-RLFN | HR{space}{detail_note}"
 
     payload: dict[str, Any] = {}
     for i, panel in enumerate(panels):
@@ -780,6 +833,7 @@ def log_validation_sr_images(
         include_detail=include_detail,
         save_dir=save_dir,
         save_subdir=save_subdir,
+        colorspace=colorspace,
     )
 
 
@@ -800,23 +854,19 @@ def run_final_sr_preview(
     Prefers ``checkpoint`` (usually ``best.pth``) when present so the panels
     reflect the best validation weights rather than the last step.
     """
-    from rk3588_mobile_sr.utils.train_framework import (
-        _normalize_state_dict,
-        _training_module_for_state_dict,
-    )
+    from rk3588_mobile_sr.utils.train_framework import load_training_module_state_dict
 
-    unwrap = _training_module_for_state_dict(model)
     if checkpoint is not None and checkpoint.is_file():
         raw = torch.load(checkpoint, map_location=device, weights_only=False)
         if isinstance(raw, dict) and "state_dict" in raw:
-            state = _normalize_state_dict(raw["state_dict"])
+            state = raw["state_dict"]
             ckpt_step = int(raw.get("step", step))
         elif isinstance(raw, dict):
-            state = _normalize_state_dict(raw)
+            state = raw
             ckpt_step = step
         else:
             raise TypeError(f"Unsupported checkpoint format: {checkpoint}")
-        unwrap.load_state_dict(state, strict=True)
+        load_training_module_state_dict(model, state)
         step = ckpt_step
         logger.info("final sr preview loading {}", checkpoint)
 
@@ -834,6 +884,7 @@ def run_final_sr_preview(
         max_size=max_size,
         save_dir=save_dir,
         save_subdir="sr_preview",
+        colorspace=colorspace,
     )
     if preview_dir is not None:
         logger.info(

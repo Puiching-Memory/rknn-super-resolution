@@ -9,7 +9,7 @@ import typer
 
 app = typer.Typer(
     name="rk3588-mobile-sr",
-    help="RK3576 Phase-MobileOne 3x super-resolution: train, evaluate, export, deploy.",
+    help="RK3576 Phase-RLFN 3x video super-resolution: train, evaluate, export, deploy.",
     no_args_is_help=True,
 )
 
@@ -41,7 +41,7 @@ def eval_psnr() -> None:
 
 @app.command("export-onnx")
 def export_onnx() -> None:
-    """Export fused MobileOneSR to ONNX."""
+    """Export the Phase-RLFN residual core to ONNX."""
     from rk3588_mobile_sr.deploy.onnx import main as export_main
 
     _run_module_main(export_main)

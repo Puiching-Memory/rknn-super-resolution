@@ -76,11 +76,22 @@ def test_validate_ddp_extended_yuv_uses_luma_and_skips_vmaf():
         def __len__(self) -> int:
             return 1
 
+    class _ForwardGuard(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.module = _Passthrough()
+            self.forward_calls = 0
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.forward_calls += 1
+            return self.module(x)
+
     rgb = torch.zeros(1, 3, 24, 24)
     rgb[:, 0] = 200.0
     yuv = rgb_to_yuv444(rgb)
+    model = _ForwardGuard()
     score, metrics = validate_ddp_extended(
-        _Passthrough(),
+        model,
         _Loader((yuv, yuv)),
         rank=0,
         world_size=1,
@@ -94,3 +105,4 @@ def test_validate_ddp_extended_yuv_uses_luma_and_skips_vmaf():
     assert metrics.psnr > 99.0
     assert metrics.y_psnr > 99.0
     assert metrics.vmaf is None
+    assert model.forward_calls == 1

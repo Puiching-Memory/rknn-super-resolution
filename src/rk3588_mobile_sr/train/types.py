@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 
 
@@ -23,12 +22,12 @@ class TrainConfig:
 
 @dataclass
 class TrainHooks:
-    """Stage-specific callbacks injected into :class:`StepTrainer`."""
+    """Stage callbacks that cannot access or invoke the training model."""
 
-    loss_fn: Callable[[nn.Module, torch.Tensor, torch.Tensor], torch.Tensor | tuple]
+    objective: Callable[[torch.Tensor, torch.Tensor], torch.Tensor | tuple]
     scheduler: optim.lr_scheduler._LRScheduler | None = None
     on_step: Callable[[int], None] | None = None
-    post_step: Callable[[nn.Module], None] | None = None
+    post_step: Callable[[], None] | None = None
     save_best_extra: Callable[[Path], None] | None = None
     on_save_step: Callable[[int, Path], None] | None = None
     on_save_best: Callable[[Path, int], None] | None = None

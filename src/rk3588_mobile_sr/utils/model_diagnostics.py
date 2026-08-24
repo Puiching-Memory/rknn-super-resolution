@@ -1,4 +1,4 @@
-"""MobileOneSR training diagnostics: norms, activations, deploy consistency."""
+"""Phase-RLFN training diagnostics: norms, activations and deploy consistency."""
 
 from __future__ import annotations
 
@@ -10,27 +10,33 @@ from contextlib import contextmanager
 import torch
 import torch.nn as nn
 
-from rk3588_mobile_sr.models import MobileOneSR
+from rk3588_mobile_sr.models import PhaseRLFNSR, SRInput, forward_sr, split_sr_input
 
 
 def _unwrap(model: nn.Module) -> nn.Module:
-    return getattr(model, "module", model)
+    inner = getattr(model, "module", model)
+    return getattr(inner, "_orig_mod", inner)
 
 
 def _group_param_name(name: str) -> str:
-    if name.startswith("body."):
+    name = name.removeprefix("core.")
+    if name.startswith("blocks."):
         parts = name.split(".")
         if len(parts) > 1 and parts[1].isdigit():
-            return f"body_{parts[1]}"
+            return f"block_{parts[1]}"
     if name.startswith("stem"):
         return "stem"
-    if name.startswith("out_conv"):
-        return "out_conv"
+    if name.startswith("codec_"):
+        return "codec_adapter"
+    if name.startswith("feature_fuse"):
+        return "feature_fuse"
+    if name.startswith("residual_head"):
+        return "residual_head"
     return "other"
 
 
 def collect_param_norms(model: nn.Module, *, prefix: str) -> dict[str, float]:
-    """L2 norm of parameters grouped by stem / body_i / out_conv."""
+    """L2 norm of parameters grouped by stem / body_i / residual_head."""
     unwrap = _unwrap(model)
     sums: dict[str, float] = defaultdict(float)
     for name, param in unwrap.named_parameters():
@@ -54,7 +60,7 @@ def collect_grad_norms(model: nn.Module) -> dict[str, float]:
 
 
 class ForwardDiagnosticsTracker:
-    """Capture stem/body/pre-clip tensors via forward hooks."""
+    """Capture stem/body/residual/final pre-clip tensors via forward hooks."""
 
     def __init__(self, model: nn.Module) -> None:
         self._unwrap = _unwrap(model)
@@ -69,12 +75,19 @@ class ForwardDiagnosticsTracker:
         def save_f_body(_module, _inputs, output):
             self._storage["f_body"] = output.detach()
 
-        def save_pre_clip(_module, _inputs, output):
-            self._storage["pre_clip"] = output.detach()
+        def save_residual(_module, _inputs, output):
+            self._storage["residual"] = output.detach()
 
-        self._handles.append(self._unwrap.stem.register_forward_hook(save_f0))
-        self._handles.append(self._unwrap.body.register_forward_hook(save_f_body))
-        self._handles.append(self._unwrap.out_conv.register_forward_hook(save_pre_clip))
+        def save_pre_clip(_module, inputs):
+            self._storage["pre_clip"] = inputs[0].detach()
+
+        core = self._unwrap.core
+        self._handles.append(core.stem.register_forward_hook(save_f0))
+        self._handles.append(core.blocks[-1].register_forward_hook(save_f_body))
+        self._handles.append(
+            core.residual_head.register_forward_hook(save_residual)
+        )
+        self._handles.append(self._unwrap.clip.register_forward_pre_hook(save_pre_clip))
 
     def clear(self) -> None:
         self._storage.clear()
@@ -92,6 +105,7 @@ class ForwardDiagnosticsTracker:
         stats: dict[str, float] = {}
         f0 = self._storage.get("f0")
         f_body = self._storage.get("f_body")
+        residual = self._storage.get("residual")
         pre_clip = self._storage.get("pre_clip")
 
         if f0 is not None and f_body is not None:
@@ -103,6 +117,11 @@ class ForwardDiagnosticsTracker:
             stats["model/clip_sat_high"] = float((pre_clip >= 254.99).float().mean().item())
             stats["model/pre_clip_mean"] = float(pre_clip.mean().item())
             stats["model/pre_clip_std"] = float(pre_clip.std().item())
+
+        if residual is not None:
+            stats["model/residual_mean"] = float(residual.mean().item())
+            stats["model/residual_std"] = float(residual.std().item())
+            stats["model/residual_abs_mean"] = float(residual.abs().mean().item())
 
         if f_body is not None:
             dead = (f_body.abs() < 1e-3).float().mean()
@@ -126,14 +145,14 @@ def collect_training_diagnostics(
 @torch.no_grad()
 def check_deploy_consistency(
     model: nn.Module,
-    data_loader: Iterator[tuple[torch.Tensor, torch.Tensor]],
+    data_loader: Iterator[tuple[SRInput, torch.Tensor]],
     device: torch.device,
     *,
     max_batches: int = 4,
 ) -> dict[str, float]:
-    """Compare train-mode multi-branch forward vs fused deploy graph."""
+    """Verify that the already-deployable BN-free graph is unchanged."""
     train_net = _unwrap(model)
-    if not isinstance(train_net, MobileOneSR):
+    if not isinstance(train_net, PhaseRLFNSR):
         return {}
 
     was_training = train_net.training
@@ -147,12 +166,17 @@ def check_deploy_consistency(
     mean_abs: list[float] = []
     match_psnr: list[float] = []
 
-    for batch_idx, (lr, _hr) in enumerate(data_loader):
+    for batch_idx, (model_input, _hr) in enumerate(data_loader):
         if batch_idx >= max_batches:
             break
-        lr = lr.to(device, non_blocking=True)
-        train_out = torch.clamp(train_net(lr), 0.0, 255.0)
-        deploy_out = torch.clamp(deploy_net(lr), 0.0, 255.0)
+        current, codec_feature = split_sr_input(model_input)
+        current = current.to(device, non_blocking=True)
+        if codec_feature is not None:
+            model_input = (current, codec_feature.to(device, non_blocking=True))
+        else:
+            model_input = current
+        train_out = torch.clamp(forward_sr(train_net, model_input), 0.0, 255.0)
+        deploy_out = torch.clamp(forward_sr(deploy_net, model_input), 0.0, 255.0)
         diff = (train_out - deploy_out).abs()
         max_abs.append(float(diff.max().item()))
         mean_abs.append(float(diff.mean().item()))

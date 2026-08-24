@@ -25,7 +25,8 @@ class _FakeMLVC(nn.Module):
         assert q_index.shape == (x.shape[0],)
         self.input_shapes.append(tuple(x.shape))
         self.fa_indices.append(fa_idx)
-        next_dpb = {"ref_frame": x, "ref_feature": torch.zeros_like(x[:, :1])}
+        feature = torch.zeros(x.shape[0], 96, x.shape[-2] // 8, x.shape[-1] // 8)
+        next_dpb = {"ref_frame": x, "ref_feature": feature}
         return {"dpb": next_dpb}
 
 
@@ -68,7 +69,8 @@ def test_runtime_pads_360_to_368_and_crops_output():
     sequence = torch.rand(1, 3, 3, 360, 640)
     output = runtime.reconstruct(sequence, torch.tensor([21]))
 
-    assert output.shape == (1, 3, 360, 640)
+    assert output.frames.shape == (1, 2, 3, 360, 640)
+    assert output.features.shape == (1, 2, 96, 46, 80)
     assert runtime.model.input_shapes == [(1, 3, 368, 640), (1, 3, 368, 640)]
     assert runtime.model.fa_indices == [1, 0]
-    assert torch.allclose(output, sequence[:, -1])
+    assert torch.allclose(output.frames[:, -1], sequence[:, -1])

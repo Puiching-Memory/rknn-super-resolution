@@ -14,6 +14,7 @@ from rk3588_mobile_sr.train.loop import StepTrainer
 from rk3588_mobile_sr.train.types import LoaderBundle, TrainConfig, TrainHooks
 from rk3588_mobile_sr.utils.run_logger import logger, setup_run_logger
 from rk3588_mobile_sr.utils.swanlab_logging import (
+    build_swanlab_run_config,
     finish_swanlab,
     resolve_swanlab_run_id,
     setup_swanlab,
@@ -58,7 +59,11 @@ class TrainSession:
             save_dir=self.save_dir,
             project=self.args.swanlab_project,
             experiment_name=experiment_name,
-            config=vars(self.args),
+            config=build_swanlab_run_config(
+                self.args,
+                world_size=self.ctx.world_size,
+                vmaf_enc_size=ValidationConfig().vmaf_enc_size,
+            ),
             disabled=self.args.no_swanlab,
             resume_training=resume_checkpoint is not None,
             run_id=swanlab_run_id,

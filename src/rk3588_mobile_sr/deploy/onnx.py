@@ -1,4 +1,6 @@
-"""Export fused MobileOneSR to ONNX for RKNN conversion."""
+"""Export the Phase-RLFN residual core to ONNX for RKNN conversion."""
+
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -8,178 +10,131 @@ import torch.nn as nn
 from torch.export import Dim
 
 from rk3588_mobile_sr.config import load_config
-from rk3588_mobile_sr.deploy.export_prep import (
-    clip_deploy_weights,
-    fused_weight_report,
-    prepare_float_for_export,
-)
-from rk3588_mobile_sr.models import MobileOneSR
-from rk3588_mobile_sr.models.qat_utils import load_deploy_float_from_qat_checkpoint
-from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict
+from rk3588_mobile_sr.deploy.export_prep import prepare_float_for_export
+from rk3588_mobile_sr.models import PhaseRLFNSR
+from rk3588_mobile_sr.models.qat_utils import load_qat_checkpoint_for_export
 
 
-class _CoreWrapper(nn.Module):
-    """Expose only the NPU-resident phase-domain graph for export."""
-
-    def __init__(self, model: MobileOneSR) -> None:
+class _SRCore(nn.Module):
+    def __init__(self, model: PhaseRLFNSR) -> None:
         super().__init__()
         self.model = model
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model.forward_core(x)
+    def forward(self, phases: torch.Tensor) -> torch.Tensor:
+        return self.model.forward_core(phases)
 
 
-def parse_args():
+class _CodecCore(nn.Module):
+    def __init__(self, model: PhaseRLFNSR) -> None:
+        super().__init__()
+        self.model = model
+
+    def forward(
+        self, phases: torch.Tensor, codec_feature: torch.Tensor
+    ) -> torch.Tensor:
+        return self.model.forward_core(phases, codec_feature)
+
+
+def parse_args() -> argparse.Namespace:
     cfg = load_config()
-    deploy = cfg.deploy
-    training = cfg.training
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weight", type=str, required=True)
-    parser.add_argument("--output", type=str, default=deploy.onnx_output)
+    parser.add_argument("--weight", required=True)
+    parser.add_argument("--output", default=cfg.deploy.onnx_output)
     parser.add_argument("--scale", type=int, default=cfg.model.scale)
     parser.add_argument("--num_channels", type=int, default=cfg.model.num_channels)
     parser.add_argument("--num_blocks", type=int, default=cfg.model.num_blocks)
     parser.add_argument("--phase_factor", type=int, default=cfg.model.phase_factor)
     parser.add_argument(
-        "--output_kernel_size", type=int, choices=[1, 3], default=cfg.model.output_kernel_size
+        "--codec-context",
+        action=argparse.BooleanOptionalAction,
+        default=cfg.deploy.codec_context,
     )
-    parser.add_argument("--num_conv_branches", type=int, default=cfg.model.num_conv_branches)
-    parser.add_argument("--qat", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--from-qat",
-        action="store_true",
-        help="Load a Stage-2 QAT checkpoint (fused deploy graph, fake-quant disabled).",
+        "--from-qat", action="store_true", help="load a prepared QAT checkpoint"
     )
-    parser.add_argument("--backend", type=str, default=training.backend)
-    parser.add_argument("--input_h", type=int, default=deploy.input_h)
-    parser.add_argument("--input_w", type=int, default=deploy.input_w)
+    parser.add_argument("--backend", default=cfg.training.backend)
+    parser.add_argument("--input_h", type=int, default=cfg.deploy.input_h)
+    parser.add_argument("--input_w", type=int, default=cfg.deploy.input_w)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--static", action="store_true")
     parser.add_argument(
-        "--static",
-        action="store_true",
-        help="Export fixed input shape (recommended for RKNN conversion).",
+        "--weight-clip", action=argparse.BooleanOptionalAction, default=False
     )
-    parser.add_argument(
-        "--bn-recalibrate",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Refresh BN running stats before deploy fuse (float export; usually keep off).",
-    )
-    parser.add_argument(
-        "--calib_dir",
-        type=str,
-        default=deploy.calib_dir,
-        help="Text file listing LR images for BN recalibration.",
-    )
-    parser.add_argument("--bn_batches", type=int, default=training.bn_batches)
-    parser.add_argument(
-        "--identity-var-floor",
-        type=float,
-        default=1e-2,
-        help="Lower bound on identity BN running_var during deploy fuse (0=disable).",
-    )
-    parser.add_argument("--clip-min", type=float, default=training.clip_min)
-    parser.add_argument("--clip-max", type=float, default=training.clip_max)
-    parser.add_argument(
-        "--weight-clip",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Clip fused conv weights after deploy fuse. Default: on for --from-qat, off for float.",
-    )
+    parser.add_argument("--clip-min", type=float, default=cfg.training.clip_min)
+    parser.add_argument("--clip-max", type=float, default=cfg.training.clip_max)
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda requested but CUDA is unavailable")
     device = torch.device(args.device)
-
-    model = MobileOneSR(
+    cfg = load_config()
+    model = PhaseRLFNSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         phase_factor=args.phase_factor,
-        output_kernel_size=args.output_kernel_size,
-        num_conv_branches=args.num_conv_branches,
+        codec_feature_channels=cfg.model.codec_feature_channels,
+        codec_project_channels=cfg.model.codec_project_channels,
+        codec_upsample_factor=cfg.model.codec_upsample_factor,
     ).to(device)
     raw = torch.load(args.weight, map_location=device, weights_only=False)
-    if isinstance(raw, dict) and "state_dict" in raw:
-        state_dict = _normalize_state_dict(raw["state_dict"])
-    elif isinstance(raw, dict):
-        state_dict = _normalize_state_dict(raw)
-    else:
+    state_dict = raw.get("state_dict", raw) if isinstance(raw, dict) else None
+    if not isinstance(state_dict, dict):
         raise TypeError(f"Unsupported checkpoint format in {args.weight}")
+    if args.input_h % args.phase_factor or args.input_w % args.phase_factor:
+        raise ValueError("input_h and input_w must be divisible by phase_factor")
+    core_h = args.input_h // args.phase_factor
+    core_w = args.input_w // args.phase_factor
+    codec_h = ((args.input_h + 15) // 16) * 2
+    codec_w = ((args.input_w + 15) // 16) * 2
+    phases = torch.randn(1, model.core_in_channels, core_h, core_w, device=device)
+    codec = torch.randn(
+        1, model.codec_feature_channels, codec_h, codec_w, device=device
+    )
+    example_inputs = (phases, codec) if args.codec_context else (phases,)
 
-    clip_min = None
-    clip_max = None
-    use_clip = args.weight_clip
-    if use_clip is None:
-        use_clip = args.from_qat or args.qat
-    if use_clip:
-        clip_min, clip_max = args.clip_min, args.clip_max
-
-    if args.from_qat or args.qat:
-        model = load_deploy_float_from_qat_checkpoint(
-            model,
-            state_dict,
-            identity_var_floor=args.identity_var_floor,
+    if args.from_qat:
+        model = load_qat_checkpoint_for_export(
+            model, state_dict, example_inputs, backend=args.backend
         )
-        if clip_min is not None and clip_max is not None:
-            clip_deploy_weights(model, clip_min, clip_max)
-            print(f"--> Fused weights clipped to [{clip_min}, {clip_max}]")
-        peaks = fused_weight_report(model)
-        print(f"--> Fused weight peaks: {peaks} (max={max(peaks.values()):.4f})")
-        model.eval()
     else:
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=True)
         prepare_float_for_export(
             model,
-            device=device,
-            calib_list=args.calib_dir if args.bn_recalibrate else None,
-            input_h=args.input_h,
-            input_w=args.input_w,
-            bn_batches=args.bn_batches,
-            identity_var_floor=args.identity_var_floor,
-            clip_min=clip_min,
-            clip_max=clip_max,
-            do_bn_recalibrate=args.bn_recalibrate,
+            clip_min=args.clip_min if args.weight_clip else None,
+            clip_max=args.clip_max if args.weight_clip else None,
         )
 
-    if args.input_h % model.phase_factor or args.input_w % model.phase_factor:
-        raise ValueError("input_h and input_w must be divisible by phase_factor")
-    core_h = args.input_h // model.phase_factor
-    core_w = args.input_w // model.phase_factor
-    core_channels = model.core_in_channels
-    core_output_channels = model.core_out_channels
-    model = _CoreWrapper(model)
-    print(
-        "--> Phase-core contract: "
-        f"NCHW (1,{core_channels},{core_h},{core_w}) -> "
-        f"(1,{core_output_channels},{core_h},{core_w}); "
-        "CPU PixelUnshuffle/PixelShuffle excluded"
-    )
-    dummy_input = torch.randn(1, core_channels, core_h, core_w).to(device)
+    wrapper: nn.Module = _CodecCore(model) if args.codec_context else _SRCore(model)
+    input_names = ["phases", "codec_feature"] if args.codec_context else ["phases"]
+    dynamic_shapes = [
+        {0: Dim("batch"), 2: Dim("phase_height"), 3: Dim("phase_width")}
+    ]
+    if args.codec_context:
+        dynamic_shapes.append(
+            {0: Dim("batch"), 2: Dim("codec_height"), 3: Dim("codec_width")}
+        )
     export_kwargs: dict = {
-        "input_names": ["input"],
-        "output_names": ["output"],
+        "input_names": input_names,
+        "output_names": ["phase_residual"],
         "opset_version": 18,
         "dynamo": True,
         "external_data": False,
     }
     if not args.static:
-        export_kwargs["dynamic_shapes"] = (
-            {
-                0: Dim("batch"),
-                2: Dim("height"),
-                3: Dim("width"),
-            },
-        )
+        export_kwargs["dynamic_shapes"] = tuple(dynamic_shapes)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    torch.onnx.export(model, (dummy_input,), str(output), **export_kwargs)
-    print(f"ONNX exported to {output}")
+    torch.onnx.export(wrapper, example_inputs, str(output), **export_kwargs)
+    print(
+        f"ONNX exported to {output}: phases={tuple(phases.shape)}, "
+        f"codec={tuple(codec.shape) if args.codec_context else None}, "
+        f"output_channels={model.core_out_channels}"
+    )
 
 
 if __name__ == "__main__":

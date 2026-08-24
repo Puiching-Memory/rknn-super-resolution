@@ -159,10 +159,10 @@ def _resolve_calib_dir(path: str) -> str:
 
 
 def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
-    channels, _, _ = _parse_input_size(args.input_size)
+    input_sizes = _parse_input_size(args.input_size)
     kwargs = {
-        "mean_values": [[0] * channels],
-        "std_values": [[1] * channels],
+        "mean_values": [[0] * channels for channels, _, _ in input_sizes],
+        "std_values": [[1] * channels for channels, _, _ in input_sizes],
         "target_platform": args.target,
         "quantized_algorithm": args.quantize,
     }
@@ -274,11 +274,11 @@ def _export_rknn(
     print(f"Encrypted RKNN exported to {enc_path}")
 
 
-def _parse_input_size(spec: str) -> list[int]:
-    parts = [int(x.strip()) for x in spec.split(",")]
-    if len(parts) != 3:
-        raise ValueError(f"input_size must be C,H,W, got {spec!r}")
-    return parts
+def _parse_input_size(spec: str) -> list[list[int]]:
+    sizes = [[int(x.strip()) for x in item.split(",")] for item in spec.split(";")]
+    if any(len(parts) != 3 for parts in sizes):
+        raise ValueError(f"input_size must be C,H,W[;C,H,W], got {spec!r}")
+    return sizes
 
 
 def _default_input_size(cfg) -> str:
@@ -287,8 +287,15 @@ def _default_input_size(cfg) -> str:
     factor = model.phase_factor
     if deploy.input_h % factor or deploy.input_w % factor:
         raise ValueError("deploy input size must be divisible by model.phase_factor")
-    channels = model.in_channels * factor * factor
-    return f"{channels},{deploy.input_h // factor},{deploy.input_w // factor}"
+    phases = (
+        f"{model.in_channels * factor * factor},"
+        f"{deploy.input_h // factor},{deploy.input_w // factor}"
+    )
+    if not deploy.codec_context:
+        return phases
+    codec_h = ((deploy.input_h + 15) // 16) * 2
+    codec_w = ((deploy.input_w + 15) // 16) * 2
+    return f"{phases};{model.codec_feature_channels},{codec_h},{codec_w}"
 
 
 def main():

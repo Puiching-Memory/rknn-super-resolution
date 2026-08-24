@@ -13,6 +13,8 @@ from skimage.metrics import structural_similarity as ssim_metric
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from rk3588_mobile_sr.models import SRInput, forward_sr, split_sr_input
+
 
 @dataclass
 class ValidationMetrics:
@@ -48,8 +50,8 @@ class ValidationMetrics:
 
 
 def iter_val_batches(
-    val_loader: Iterable[tuple[torch.Tensor, torch.Tensor]],
-) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+    val_loader: Iterable[tuple[SRInput, torch.Tensor]],
+) -> Iterator[tuple[SRInput, torch.Tensor]]:
     """Yield already-processed MLVC validation batches."""
     yield from val_loader
 
@@ -202,8 +204,8 @@ def validate_ddp_extended(
         from rk3588_mobile_sr.data.yuv_utils import yuv444_to_rgb
 
     unwrap = getattr(model, "module", model)
-    was_training = unwrap.training
-    unwrap.eval()
+    was_training = model.training
+    model.eval()
 
     device = _module_device(unwrap, rank)
     shave = scale
@@ -212,10 +214,15 @@ def validate_ddp_extended(
     offset = 0
     enc_h, enc_w = vmaf_enc_size if vmaf_enc_size is not None else (None, None)
 
-    for lr, hr in iter_val_batches(val_loader):
-        lr = lr.to(device, non_blocking=True)
+    for model_input, hr in iter_val_batches(val_loader):
+        current, codec_feature = split_sr_input(model_input)
+        current = current.to(device, non_blocking=True)
+        if codec_feature is not None:
+            model_input = (current, codec_feature.to(device, non_blocking=True))
+        else:
+            model_input = current
         hr = hr.to(device, non_blocking=True)
-        out = torch.clamp(unwrap(lr), 0.0, 255.0)
+        out = torch.clamp(forward_sr(model, model_input), 0.0, 255.0)
 
         if colorspace == "yuv":
             out_rgb = yuv444_to_rgb(out)
@@ -289,7 +296,7 @@ def validate_ddp_extended(
             )
 
     if was_training:
-        unwrap.train()
+        model.train()
 
     if world_size > 1:
         gathered: list[list[tuple[int, float, float, float, float, float, float]] | None] = [

@@ -17,9 +17,16 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=str, default=None)
     parser.add_argument("--dataset_description", type=str, default=None)
+    parser.add_argument("--video_root", type=str, default=None)
     parser.add_argument("--mlvc_repo", type=str, default=None)
     parser.add_argument("--mlvc_checkpoint", type=str, default=None)
     parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument(
+        "--codec-context",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="include the MLVC decoder-feature input",
+    )
     parser.add_argument("--output_dir", type=Path, default=Path("data/rknn_calib_ycbcr"))
     parser.add_argument("--output_list", type=Path, default=Path("data/rknn_calib.txt"))
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -40,8 +47,10 @@ def main() -> None:
     model_cfg = app_cfg.model
     overrides = {
         "dataset_description": args.dataset_description,
+        "video_root": args.video_root,
         "mlvc_repo": args.mlvc_repo,
         "mlvc_checkpoint": args.mlvc_checkpoint,
+        "codec_context": args.codec_context,
     }
     data = replace(
         data,
@@ -52,7 +61,6 @@ def main() -> None:
         data,
         device=device,
         batch_size=1,
-        patch_size=None,
         scale=3,
         colorspace="yuv",
         train_aug=False,
@@ -66,17 +74,25 @@ def main() -> None:
     output_list = args.output_list.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     output_list.parent.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
+    paths: list[tuple[Path, Path | None]] = []
     try:
-        for lr_ycbcr, _hr in val_loader:
-            for sample in lr_ycbcr:
+        for model_input, _hr in val_loader:
+            if isinstance(model_input, torch.Tensor):
+                lr_ycbcr, codec_features = model_input, None
+            else:
+                lr_ycbcr, codec_features = model_input
+            for offset, sample in enumerate(lr_ycbcr):
                 sample = sample.clamp(0.0, 255.0).round().byte()
                 packed = torch.nn.functional.pixel_unshuffle(
                     sample.unsqueeze(0), model_cfg.phase_factor
                 ).cpu().numpy()
-                path = output_dir / f"mlvc_{len(paths):04d}.npy"
-                np.save(path, packed)
-                paths.append(path)
+                phase_path = output_dir / f"mlvc_{len(paths):04d}_phases.npy"
+                np.save(phase_path, packed)
+                codec_path = None
+                if codec_features is not None:
+                    codec_path = output_dir / f"mlvc_{len(paths):04d}_codec.npy"
+                    np.save(codec_path, codec_features[offset : offset + 1].cpu().numpy())
+                paths.append((phase_path, codec_path))
                 if len(paths) >= args.samples:
                     break
             if len(paths) >= args.samples:
@@ -84,7 +100,11 @@ def main() -> None:
     finally:
         train_loader.close()
 
-    output_list.write_text("".join(f"{path}\n" for path in paths), encoding="utf-8")
+    lines = [
+        f"{phase} {codec}\n" if codec is not None else f"{phase}\n"
+        for phase, codec in paths
+    ]
+    output_list.write_text("".join(lines), encoding="utf-8")
     print(f"wrote {len(paths)} MLVC YCbCr444 calibration inputs to {output_list}")
 
 

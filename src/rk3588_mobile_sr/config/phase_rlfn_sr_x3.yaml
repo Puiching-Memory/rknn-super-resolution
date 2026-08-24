@@ -3,14 +3,16 @@ model:
   in_channels: 3
   out_channels: 3
   num_channels: 32
-  num_blocks: 6
+  num_blocks: 4
   phase_factor: 2
-  output_kernel_size: 3
-  num_conv_branches: 4
+  codec_feature_channels: 96
+  codec_project_channels: 16
+  codec_upsample_factor: 4
   negative_slope: 0.1
 
 data:
-  dataset_description: "data/OpenVidHD/openvidhd_60k_train64/description.json"
+  dataset_description: "data/OpenVidHD/openvidhd_60k64_frame_sequences.csv"
+  video_root: "data/OpenVidHD"
   mlvc_repo: "third_party/mlvc"
   mlvc_checkpoint: "data/mlvc/mlvc-s-psnr-v1.ckpt"
   mlvc_variant: "small"
@@ -26,17 +28,17 @@ data:
   num_workers: 4
   prefetch_batches: 1
   mlvc_amp: true
+  codec_context: true
+  codec_dropout: 0.25
 
 training:
-  patch_size: 128
   batch_size: 2
-  qat_patch_size: 144
   qat_batch_size: 1
   log_every: 500
   val_every: 1000
   save_every: 5000
   float_lr: 1.0e-3
-  qat_lr: 1.0e-6
+  qat_lr: 1.0e-5
   float_patience: 10
   float_min_delta: 0.1
   float_min_evaluations: 12
@@ -52,16 +54,17 @@ training:
   clip_min: -1.0
   clip_max: 1.0
   ema_decay: 0.999
-  bn_batches: 64
   backend: "qnnpack"
+  val_metric: "vmaf"
 
 deploy:
   target: "rk3576"
   input_h: 360
   input_w: 640
-  onnx_output: "mobileone_sr_x3.onnx"
-  rknn_output: "mobileone_sr_x3.rknn"
+  onnx_output: "phase_rlfn_sr_x3.onnx"
+  rknn_output: "phase_rlfn_sr_x3.rknn"
   calib_dir: "data/rknn_calib.txt"
   rknn_python: ".venv-rknn/bin/python"
   rknn_quantize: "kl_divergence"
   rknn_quantized_method: "channel"
+  codec_context: true

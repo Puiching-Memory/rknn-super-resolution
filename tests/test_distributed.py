@@ -4,20 +4,27 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from rk3588_mobile_sr.distributed.context import DistributedContext
+from rk3588_mobile_sr.distributed.context import DistributedContext, distributed_session
+from rk3588_mobile_sr.distributed.model import wrap_training_model
 from rk3588_mobile_sr.distributed.sync import rank0_section
 from rk3588_mobile_sr.distributed.validation import (
     EarlyStopState,
     ValidationConfig,
     ValidationResult,
+    primary_metric_logs,
 )
-from rk3588_mobile_sr.models.mobileone_sr import MobileOneSR
+from rk3588_mobile_sr.models import PhaseRLFNSR
 from rk3588_mobile_sr.train.loop import StepTrainer
 from rk3588_mobile_sr.train.types import TrainConfig, TrainHooks
+from rk3588_mobile_sr.utils.train_framework import (
+    load_training_module_state_dict,
+    training_module_state_dict,
+)
 
 
 def test_rank0_section_main_runs_fn_then_barriers():
@@ -60,6 +67,17 @@ def test_early_stop_best_psnr_alias_tracks_score():
     assert state.best_psnr == state.best_score
     state.best_psnr = 31.0
     assert state.best_score == 31.0
+
+
+def test_primary_metric_logs_keeps_vmaf_out_of_best_psnr():
+    logs = primary_metric_logs(
+        primary_key="val/vmaf",
+        best_score=41.53,
+        psnr_at_best=31.35,
+    )
+    assert logs["val/best_score"] == 41.53
+    assert logs["val/best_vmaf"] == 41.53
+    assert logs["val/best_psnr"] == 31.35
 
 
 def test_early_stop_triggers_after_patience():
@@ -111,7 +129,7 @@ def test_validation_config_defaults_to_yuv():
 def test_step_trainer_runs_steps_and_validation(tmp_path):
     device = torch.device("cpu")
     ctx = DistributedContext(rank=0, world_size=1, device=device)
-    model = MobileOneSR(num_channels=8, num_blocks=1, scale=3).to(device)
+    model = PhaseRLFNSR(num_channels=8, num_blocks=1, scale=3).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     lr = torch.rand(4, 3, 32, 32)
@@ -127,7 +145,7 @@ def test_step_trainer_runs_steps_and_validation(tmp_path):
     train_loader = _CycleLoader()
 
     hooks = TrainHooks(
-        loss_fn=lambda m, lr_t, hr_t: nn.functional.l1_loss(m(lr_t), hr_t),
+        objective=nn.functional.l1_loss,
     )
     config = TrainConfig(
         max_steps=10,
@@ -166,3 +184,91 @@ def test_step_trainer_runs_steps_and_validation(tmp_path):
     assert final_step == 10
     assert val_steps == [5, 10]
     assert (tmp_path / "last.pth").exists()
+
+
+def test_step_trainer_never_bypasses_wrapped_model(tmp_path):
+    """A wrapper exposing ``.module`` must still own every training forward."""
+
+    class _ForwardGuard(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.module = PhaseRLFNSR(num_channels=4, num_blocks=1)
+            self.forward_calls = 0
+
+        def forward(self, *args, **kwargs):
+            self.forward_calls += 1
+            return self.module(*args, **kwargs)
+
+    device = torch.device("cpu")
+    ctx = DistributedContext(rank=0, world_size=1, device=device)
+    model = _ForwardGuard()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    lr = torch.rand(1, 3, 8, 8) * 255.0
+    hr = torch.rand(1, 3, 24, 24) * 255.0
+
+    class _InfiniteLoader:
+        def __iter__(self):
+            while True:
+                yield lr, hr
+
+    trainer = StepTrainer(
+        ctx,
+        model,
+        _InfiniteLoader(),
+        optimizer,
+        TrainConfig(
+            max_steps=1,
+            log_every=1,
+            val_every=10,
+            save_every=10,
+            prefetch_batches=1,
+        ),
+        TrainHooks(objective=nn.functional.l1_loss),
+        save_dir=tmp_path,
+        model_diag=False,
+    )
+    trainer.run()
+    assert model.forward_calls == 1
+
+
+def test_torch_state_dict_api_canonicalizes_compiled_model() -> None:
+    model = torch.compile(nn.Linear(3, 2))
+    state = training_module_state_dict(model)
+    assert set(state) == {"weight", "bias"}
+    replacement = {name: torch.zeros_like(value) for name, value in state.items()}
+    load_training_module_state_dict(model, replacement)
+    assert all(torch.count_nonzero(value) == 0 for value in model.parameters())
+
+
+def test_cuda_barrier_passes_local_device_index():
+    ctx = DistributedContext(rank=3, world_size=4, device=torch.device("cuda:1"))
+    with patch("rk3588_mobile_sr.distributed.context.dist.barrier") as mock_barrier:
+        ctx.barrier()
+    mock_barrier.assert_called_once_with(device_ids=[1])
+
+
+def test_ddp_wrap_uses_device_index_not_global_rank():
+    captured: dict[str, object] = {}
+
+    class _FakeDDP(nn.Module):
+        def __init__(self, module, device_ids=None, output_device=None, **kwargs):
+            super().__init__()
+            captured["device_ids"] = device_ids
+            captured["output_device"] = output_device
+            self.module = module
+
+    ctx = DistributedContext(rank=3, world_size=4, device=torch.device("cuda:1"))
+    model = nn.Linear(2, 2)
+    with patch("rk3588_mobile_sr.distributed.model.DDP", _FakeDDP):
+        wrapped = wrap_training_model(model, ctx, compile_model=False)
+    assert captured["device_ids"] == [1]
+    assert captured["output_device"] == 1
+    assert wrapped.module is model
+
+
+def test_distributed_session_requires_torchrun_env(monkeypatch):
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    with pytest.raises(RuntimeError, match="torchrun"), distributed_session():
+        pass

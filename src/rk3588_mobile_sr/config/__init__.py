@@ -1,4 +1,4 @@
-"""YAML configuration loading for MobileOneSR."""
+"""YAML configuration loading for PhaseRLFNSR."""
 
 from __future__ import annotations
 
@@ -16,16 +16,18 @@ class ModelConfig:
     in_channels: int = 3
     out_channels: int = 3
     num_channels: int = 32
-    num_blocks: int = 6
+    num_blocks: int = 4
     phase_factor: int = 2
-    output_kernel_size: int = 3
-    num_conv_branches: int = 4
+    codec_feature_channels: int = 96
+    codec_project_channels: int = 16
+    codec_upsample_factor: int = 4
     negative_slope: float = 0.1
 
 
 @dataclass
 class DataConfig:
-    dataset_description: str = "data/OpenVidHD/openvidhd_60k_train64/description.json"
+    dataset_description: str = "data/OpenVidHD/openvidhd_60k64_frame_sequences.csv"
+    video_root: str = "data/OpenVidHD"
     mlvc_repo: str = "third_party/mlvc"
     mlvc_checkpoint: str = "data/mlvc/mlvc-s-psnr-v1.ckpt"
     mlvc_variant: str = "small"
@@ -41,19 +43,19 @@ class DataConfig:
     num_workers: int = 4
     prefetch_batches: int = 1
     mlvc_amp: bool = True
+    codec_context: bool = True
+    codec_dropout: float = 0.25
 
 
 @dataclass
 class TrainingConfig:
-    patch_size: int = 128
     batch_size: int = 2
-    qat_patch_size: int = 144
     qat_batch_size: int = 1
     log_every: int = 500
     val_every: int = 1000
     save_every: int = 5000
     float_lr: float = 1e-3
-    qat_lr: float = 1e-6
+    qat_lr: float = 1e-5
     float_patience: int = 10
     float_min_delta: float = 0.1
     float_min_evaluations: int = 12
@@ -69,8 +71,8 @@ class TrainingConfig:
     clip_min: float = -1.0
     clip_max: float = 1.0
     ema_decay: float = 0.999
-    bn_batches: int = 64
     backend: str = "qnnpack"
+    val_metric: str = "vmaf"
 
 
 @dataclass
@@ -78,14 +80,15 @@ class DeployConfig:
     target: str = "rk3576"
     input_h: int = 360
     input_w: int = 640
-    onnx_output: str = "mobileone_sr_x3.onnx"
-    rknn_output: str = "mobileone_sr_x3.rknn"
+    onnx_output: str = "phase_rlfn_sr_x3.onnx"
+    rknn_output: str = "phase_rlfn_sr_x3.rknn"
     calib_dir: str = "data/rknn_calib.txt"
     rknn_python: str = ".venv-rknn/bin/python"
     rknn_quantize: str = "kl_divergence"
     rknn_quantized_method: str = "channel"
     rknn_encrypt: bool = False
     rknn_crypt_level: int = 1
+    codec_context: bool = True
 
 
 @dataclass
@@ -115,7 +118,7 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     if path is None:
         config_text = (
             resources.files("rk3588_mobile_sr.config")
-            .joinpath("mobileone_sr_x3.yaml")
+            .joinpath("phase_rlfn_sr_x3.yaml")
             .read_text(encoding="utf-8")
         )
         raw = yaml.safe_load(config_text) or {}
@@ -133,4 +136,4 @@ def load_config(path: Path | str | None = None) -> AppConfig:
 
 def default_config_path() -> Path:
     """Return the path to the bundled default config file."""
-    return Path(str(resources.files("rk3588_mobile_sr.config").joinpath("mobileone_sr_x3.yaml")))
+    return Path(str(resources.files("rk3588_mobile_sr.config").joinpath("phase_rlfn_sr_x3.yaml")))

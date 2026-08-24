@@ -10,8 +10,7 @@ from PIL import Image
 from skimage.metrics import structural_similarity as ssim
 
 from rk3588_mobile_sr.config import load_config
-from rk3588_mobile_sr.models import MobileOneSR
-from rk3588_mobile_sr.utils.train_framework import _normalize_state_dict
+from rk3588_mobile_sr.models import PhaseRLFNSR
 
 
 def parse_args():
@@ -24,10 +23,6 @@ def parse_args():
     parser.add_argument("--num_channels", type=int, default=cfg.num_channels)
     parser.add_argument("--num_blocks", type=int, default=cfg.num_blocks)
     parser.add_argument("--phase_factor", type=int, default=cfg.phase_factor)
-    parser.add_argument(
-        "--output_kernel_size", type=int, choices=[1, 3], default=cfg.output_kernel_size
-    )
-    parser.add_argument("--num_conv_branches", type=int, default=cfg.num_conv_branches)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     parser.add_argument("--save_dir", type=str, default=None)
     return parser.parse_args()
@@ -38,17 +33,19 @@ def evaluate(args):
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("--device cuda requested but CUDA is unavailable")
     device = torch.device(args.device)
-    model = MobileOneSR(
+    cfg = load_config().model
+    model = PhaseRLFNSR(
         scale=args.scale,
         num_channels=args.num_channels,
         num_blocks=args.num_blocks,
         phase_factor=args.phase_factor,
-        output_kernel_size=args.output_kernel_size,
-        num_conv_branches=args.num_conv_branches,
+        codec_feature_channels=cfg.codec_feature_channels,
+        codec_project_channels=cfg.codec_project_channels,
+        codec_upsample_factor=cfg.codec_upsample_factor,
     ).to(device)
     raw = torch.load(args.weight, map_location=device, weights_only=False)
     state_dict = raw["state_dict"] if isinstance(raw, dict) and "state_dict" in raw else raw
-    model.load_state_dict(_normalize_state_dict(state_dict))
+    model.load_state_dict(state_dict)
     model.switch_to_deploy()
     model.eval()
 

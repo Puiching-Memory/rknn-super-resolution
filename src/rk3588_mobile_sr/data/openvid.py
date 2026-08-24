@@ -1,8 +1,8 @@
-"""OpenVidHD sequence dataset using MLVC's ``description.json`` format."""
+"""OpenVidHD sequence index from MLVC ``frame_sequences.csv`` of source videos."""
 
 from __future__ import annotations
 
-import json
+import csv
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,53 +11,108 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from rk3588_mobile_sr.data.decode import resolve_sequence_source
+from rk3588_mobile_sr.data.decode import VIDEO_SUFFIXES, require_video_file
+from rk3588_mobile_sr.utils.run_logger import logger
 
 
 @dataclass(frozen=True)
 class OpenVidSequence:
     path: str
-    frames: tuple[str, ...]
+    n_frames: int
+    start_frame: int
     width: int
     height: int
+    bbox: tuple[int, int, int, int]
 
 
-def load_openvid_description(path: str | Path) -> list[OpenVidSequence]:
-    """Load both description layouts accepted by MLVC's FastVideoFolder."""
-    description = Path(path)
-    with description.open(encoding="utf-8") as handle:
-        raw = json.load(handle)
+def index_video_files(root: Path) -> dict[str, Path]:
+    """Map video basenames under ``root`` to resolved paths (first match wins)."""
+    catalog: dict[str, Path] = {}
+    for suffix in sorted(VIDEO_SUFFIXES):
+        for path in sorted(root.rglob(f"*{suffix}")):
+            if path.is_file() and path.name not in catalog:
+                catalog[path.name] = path.resolve()
+    return catalog
 
-    if isinstance(raw, list):
-        rows = raw
-        shared_frames = None
-    elif isinstance(raw, dict) and "seqs" in raw and "frames" in raw:
-        rows = raw["seqs"]
-        shared_frames = raw["frames"]
-    else:
-        raise ValueError(f"invalid MLVC dataset description: {description}")
 
+def load_openvid_frame_sequences(
+    path: str | Path,
+    video_root: str | Path,
+) -> list[OpenVidSequence]:
+    """Load MLVC ``frame_sequences.csv`` and keep rows whose video exists under ``video_root``."""
+    csv_path = Path(path)
+    root = Path(video_root)
+    catalog = index_video_files(root)
+    required = {
+        "filename",
+        "start_frame",
+        "n_frames",
+        "width",
+        "height",
+        "bbox_top",
+        "bbox_bottom",
+        "bbox_left",
+        "bbox_right",
+    }
     sequences: list[OpenVidSequence] = []
-    for index, row in enumerate(rows):
-        frames = shared_frames if shared_frames is not None else row.get("frames")
-        if not isinstance(frames, list) or not frames:
-            raise ValueError(f"sequence {index} has no frames in {description}")
-        seq_length = int(row.get("seq_length", len(frames)))
-        if seq_length > len(frames):
-            raise ValueError(
-                f"sequence {index} declares {seq_length} frames but lists only {len(frames)}"
+    total = 0
+    skipped_missing = 0
+    skipped_scale = 0
+    with csv_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError(f"invalid OpenVidHD frame-sequence CSV: {csv_path}")
+        for row in reader:
+            total += 1
+            if int(row.get("scale_factor", "1")) != 1:
+                skipped_scale += 1
+                continue
+            source = catalog.get(row["filename"])
+            if source is None:
+                skipped_missing += 1
+                continue
+            n_frames = int(row["n_frames"])
+            left = int(row["bbox_left"])
+            top = int(row["bbox_top"])
+            right = int(row["bbox_right"])
+            bottom = int(row["bbox_bottom"])
+            if n_frames < 2 or right <= left or bottom <= top:
+                continue
+            sequences.append(
+                OpenVidSequence(
+                    path=str(source),
+                    n_frames=n_frames,
+                    start_frame=int(row["start_frame"]),
+                    width=int(row["width"]),
+                    height=int(row["height"]),
+                    bbox=(left, top, right, bottom),
+                )
             )
-        sequences.append(
-            OpenVidSequence(
-                path=str(row["path"]),
-                frames=tuple(str(name) for name in frames[:seq_length]),
-                width=int(row["width"]),
-                height=int(row["height"]),
-            )
-        )
     if not sequences:
-        raise ValueError(f"empty MLVC dataset description: {description}")
+        raise ValueError(f"no OpenVidHD videos from {csv_path} found under {root}")
+    logger.info(
+        "OpenVidHD CSV {}: using {}/{} sequences (missing video={}, scale_factor!=1={}) under {}",
+        csv_path,
+        len(sequences),
+        total,
+        skipped_missing,
+        skipped_scale,
+        root,
+    )
     return sequences
+
+
+def load_openvid_index(
+    path: str | Path,
+    *,
+    video_root: str | Path | None = None,
+) -> list[OpenVidSequence]:
+    """Load MLVC ``frame_sequences.csv`` and resolve videos under ``video_root``."""
+    index = Path(path)
+    if index.suffix.lower() != ".csv":
+        raise ValueError(f"OpenVidHD index must be a .csv file, got {index}")
+    root = Path(video_root) if video_root is not None else index.parent
+    return load_openvid_frame_sequences(index, root)
 
 
 def split_sequence_indices(
@@ -96,11 +151,9 @@ def crop_box(width: int, height: int, *, training: bool) -> tuple[int, int, int,
 
 
 def collate_openvid_batch(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Collate metadata samples without stacking variable-length path lists."""
+    """Collate clip metadata for GPU-side video decode."""
     batch: dict[str, Any] = {
-        "kind": [sample["kind"] for sample in samples],
         "source": [sample["source"] for sample in samples],
-        "paths": [sample["paths"] for sample in samples],
         "frame_indices": torch.stack([sample["frame_indices"] for sample in samples]),
         "crop": torch.stack([sample["crop"] for sample in samples]),
         "hflip": torch.stack([sample["hflip"] for sample in samples]),
@@ -115,7 +168,7 @@ class OpenVidSequenceDataset(Dataset[dict[str, Any]]):
 
     def __init__(
         self,
-        description: str | Path,
+        sequences: list[OpenVidSequence],
         *,
         indices: list[int],
         sequence_frames: int,
@@ -126,17 +179,14 @@ class OpenVidSequenceDataset(Dataset[dict[str, Any]]):
         q_indices: tuple[int, ...] = (),
         max_samples: int | None = None,
     ) -> None:
-        self.description = Path(description).resolve()
-        self.root = self.description.parent
-        all_sequences = load_openvid_description(self.description)
-        self.sequences = [all_sequences[index] for index in indices]
+        self.sequences = [sequences[index] for index in indices]
         if max_samples is not None:
             self.sequences = self.sequences[:max_samples]
         if not self.sequences:
             raise ValueError("OpenVidHD split contains no sequences")
         if sequence_frames < 2:
             raise ValueError("sequence_frames must be at least 2 for MLVC P-frame reconstruction")
-        if any(len(sequence.frames) < sequence_frames for sequence in self.sequences):
+        if any(sequence.n_frames < sequence_frames for sequence in self.sequences):
             raise ValueError("every selected OpenVidHD sequence must cover sequence_frames")
         if not training_split and not q_indices:
             raise ValueError("validation requires at least one fixed q_index")
@@ -161,29 +211,34 @@ class OpenVidSequenceDataset(Dataset[dict[str, Any]]):
             sequence = self.sequences[sequence_index]
             q_index = self.q_indices[q_offset]
 
-        max_start = len(sequence.frames) - self.sequence_frames
+        max_start = sequence.n_frames - self.sequence_frames
         start = random.randint(0, max_start) if self.augment and max_start else max_start // 2
-        frame_indices = list(range(start, start + self.sequence_frames))
+        local_indices = list(range(start, start + self.sequence_frames))
         if self.augment and random.random() < 0.5:
-            frame_indices.reverse()
+            local_indices.reverse()
 
-        kind, source = resolve_sequence_source(self.root, sequence.path)
-        if kind == "video":
-            paths: list[str] = []
-        else:
-            paths = [str(source / sequence.frames[frame_index]) for frame_index in frame_indices]
-
-        left, top, right, bottom = crop_box(
-            sequence.width,
-            sequence.height,
+        source = require_video_file(sequence.path)
+        left, top, right, bottom = sequence.bbox
+        inner_left, inner_top, inner_right, inner_bottom = crop_box(
+            right - left,
+            bottom - top,
             training=self.augment,
         )
         sample: dict[str, Any] = {
-            "kind": kind,
             "source": str(source),
-            "paths": paths,
-            "frame_indices": torch.tensor(frame_indices, dtype=torch.long),
-            "crop": torch.tensor((left, top, right, bottom), dtype=torch.long),
+            "frame_indices": torch.tensor(
+                [sequence.start_frame + offset for offset in local_indices],
+                dtype=torch.long,
+            ),
+            "crop": torch.tensor(
+                (
+                    left + inner_left,
+                    top + inner_top,
+                    left + inner_right,
+                    top + inner_bottom,
+                ),
+                dtype=torch.long,
+            ),
             "hflip": torch.tensor(self.augment and random.random() < 0.5),
         }
         if q_index is not None:

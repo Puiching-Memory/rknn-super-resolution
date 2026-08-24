@@ -66,9 +66,9 @@ def test_load_raw_requires_unified_checkpoint(tmp_path):
     assert raw["step"] == 3
 
 
-def test_validate_training_args_rejects_patch_not_aligned_to_phase(monkeypatch):
+def test_validate_training_args_rejects_lr_not_aligned_to_phase(monkeypatch):
     args = _parsed_args(monkeypatch)
-    args.patch_size = 127
+    args.lr_size = (361, 640)
     with pytest.raises(ValueError, match="phase_factor"):
         validate_training_args(args)
 
@@ -82,20 +82,48 @@ def test_validate_training_args_rejects_short_safety_cap(monkeypatch):
         validate_training_args(args)
 
 
-def test_float_validation_keeps_vmaf_and_yuv(monkeypatch):
+def test_removed_no_vmaf_flag_is_rejected(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["rk3588-train", "--no_vmaf"])
+    with pytest.raises(SystemExit):
+        parse_args()
     args = _parsed_args(monkeypatch)
-    cfg = _validation_config(args, extended=True, data_preview=True, final_preview=False)
-    assert cfg.colorspace == "yuv"
-    assert cfg.extended is True
-    assert cfg.compute_vmaf is True
-    assert cfg.final_preview is False
+    assert not hasattr(args, "no_vmaf")
 
 
-def test_qat_validation_uses_psnr_not_vmaf(monkeypatch):
+def test_default_val_metric_is_vmaf_for_all_phases(monkeypatch):
     args = _parsed_args(monkeypatch)
-    cfg = _validation_config(args, extended=False, data_preview=False, final_preview=True)
-    assert cfg.colorspace == "yuv"
-    assert cfg.extended is False
-    assert cfg.compute_vmaf is False
-    assert cfg.deploy_check is False
-    assert cfg.final_preview is True
+    assert args.val_metric == "vmaf"
+    assert args.colorspace == "yuv"
+    assert args.q_indices == [0, 21, 42, 63]
+    assert args.sequence_frames == 8
+    float_cfg = _validation_config(
+        args, extended=True, data_preview=True, final_preview=False
+    )
+    qat_cfg = _validation_config(
+        args, extended=False, data_preview=False, final_preview=True
+    )
+    assert float_cfg.compute_vmaf is True
+    assert qat_cfg.compute_vmaf is True
+    assert float_cfg.colorspace == "yuv"
+    assert qat_cfg.deploy_check is False
+    assert qat_cfg.final_preview is True
+
+
+def test_val_metric_psnr_disables_vmaf_for_all_phases(monkeypatch):
+    args = _parsed_args(monkeypatch, "--val_metric", "psnr")
+    assert args.val_metric == "psnr"
+    float_cfg = _validation_config(
+        args, extended=True, data_preview=True, final_preview=False
+    )
+    qat_cfg = _validation_config(
+        args, extended=False, data_preview=False, final_preview=True
+    )
+    assert float_cfg.compute_vmaf is False
+    assert qat_cfg.compute_vmaf is False
+
+
+def test_validate_training_args_rejects_unknown_val_metric(monkeypatch):
+    args = _parsed_args(monkeypatch)
+    args.val_metric = "ssim"
+    with pytest.raises(ValueError, match="val_metric"):
+        validate_training_args(args)

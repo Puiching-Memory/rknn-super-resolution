@@ -11,12 +11,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from rk3588_mobile_sr.distributed.context import DistributedContext
-from rk3588_mobile_sr.distributed.model import is_compiled_module, unwrap_model
+from rk3588_mobile_sr.distributed.model import is_compiled_module
 from rk3588_mobile_sr.distributed.sync import rank0_section
 from rk3588_mobile_sr.utils.model_diagnostics import check_deploy_consistency
 from rk3588_mobile_sr.utils.run_logger import logger
 from rk3588_mobile_sr.utils.sr_metrics import ValidationMetrics, validate_ddp_extended
 from rk3588_mobile_sr.utils.swanlab_logging import log_metrics, log_validation_sr_images
+from rk3588_mobile_sr.utils.train_framework import training_module_state_dict
 from rk3588_mobile_sr.utils.vmaf_metric import DEFAULT_VMAF_MODEL
 
 
@@ -45,6 +46,8 @@ class EarlyStopState:
     min_delta: float = 0.1
     min_evaluations: int = 0
     best_score: float = -1.0
+    plateau_score: float = -1.0
+    psnr_at_best: float = -1.0
     patience_counter: int = 0
     evaluations: int = 0
 
@@ -66,9 +69,13 @@ class EarlyStopState:
                 self.best_score = score
             return improved, False
 
-        improved = score > self.best_score + self.min_delta
+        improved = score > self.best_score
         if improved:
             self.best_score = score
+
+        significant = score > self.plateau_score + self.min_delta
+        if significant:
+            self.plateau_score = score
             self.patience_counter = 0
         else:
             self.patience_counter += 1
@@ -77,6 +84,25 @@ class EarlyStopState:
             and self.patience_counter >= self.patience
         )
         return improved, should_stop
+
+
+def primary_metric_logs(
+    *,
+    primary_key: str,
+    best_score: float,
+    psnr_at_best: float,
+) -> dict[str, float]:
+    """SwanLab keys for the tracked best checkpoint.
+
+    ``val/best_score`` is the primary metric (VMAF or PSNR). ``val/best_psnr``
+    is always the PSNR of that checkpoint, not an alias of VMAF.
+    """
+    metrics = {"val/best_score": best_score}
+    if psnr_at_best >= 0.0:
+        metrics["val/best_psnr"] = psnr_at_best
+    if primary_key == "val/vmaf":
+        metrics["val/best_vmaf"] = best_score
+    return metrics
 
 
 @dataclass
@@ -135,15 +161,18 @@ class ValidationRunner:
         )
 
         def _main_hooks() -> None:
+            if improved and val_metrics is not None:
+                self.early_stop.psnr_at_best = val_metrics.psnr
             primary_key = (
                 "val/vmaf"
                 if self.config.compute_vmaf and val_metrics is not None and val_metrics.vmaf is not None
                 else "val/psnr"
             )
-            metrics: dict[str, float] = {
-                "val/best_score": self.early_stop.best_score,
-                "val/best_psnr": self.early_stop.best_score,  # legacy SwanLab key
-            }
+            metrics: dict[str, float] = primary_metric_logs(
+                primary_key=primary_key,
+                best_score=self.early_stop.best_score,
+                psnr_at_best=self.early_stop.psnr_at_best,
+            )
             if val_metrics is not None:
                 metrics.update(val_metrics.to_log_dict())
             else:
@@ -151,8 +180,7 @@ class ValidationRunner:
             if self.early_stop.enabled:
                 metrics["early_stop/patience"] = self.early_stop.patience_counter
 
-            unwrap = unwrap_model(self.model)
-            if self.config.deploy_check and not is_compiled_module(unwrap):
+            if self.config.deploy_check and not is_compiled_module(self.model):
                 deploy_metrics = check_deploy_consistency(
                     self.model, self.val_loader, self.ctx.device
                 )
@@ -209,7 +237,7 @@ class ValidationRunner:
                 if self.save_best is not None:
                     self.save_best(best_path, step)
                 else:
-                    torch.save(unwrap.state_dict(), best_path)
+                    torch.save(training_module_state_dict(self.model), best_path)
                 if self.save_best_extra is not None:
                     self.save_best_extra(best_path)
 

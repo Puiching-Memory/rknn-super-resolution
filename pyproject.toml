@@ -1,34 +1,33 @@
 [project]
 name = "rk3588-mobile-sr"
 version = "0.1.0"
-description = "RK3576 frozen-MLVC video reconstruction and Phase-MobileOne 3x super-resolution"
+description = "RK3576 frozen-MLVC codec-aware Phase-RLFN 3x super-resolution"
 readme = "README.md"
-requires-python = "==3.12.*"
+requires-python = "==3.13.*"
 license = { text = "MIT" }
 dependencies = [
-    "onnx>=1.17",
-    "onnxscript>=0.7",
-    "loguru>=0.7",
-    "pillow>=10.0",
-    "pyyaml>=6.0",
-    "rich>=13.0",
-    "scikit-image>=0.21",
-    "swanlab>=0.5.0",
-    "torch>=2.12.0",
-    "torchcodec>=0.16.0",
-    "torchvision>=0.27.0",
-    "traceml-ai>=0.3.1",
-    "typer>=0.12.0",
-    "einops>=0.8.0",
-    "pre-commit>=3.7",
-    "pytest>=8.0",
-    "ruff>=0.6.0",
-    "pyiqa>=0.1.15.post2",
+    "onnx==1.22.0",
+    "onnxscript==0.7.1",
+    "loguru==0.7.3",
+    "pillow==12.3.0",
+    "pyyaml==6.0.3",
+    "rich==15.0.0",
+    "scikit-image==0.26.0",
+    "swanlab==0.9.1",
+    "torch==2.13.0+cu132",
+    "torchcodec==0.16.0+cu132",
+    "torchvision==0.28.0+cu132",
+    "traceml-ai==0.3.6",
+    "typer==0.26.8",
+    "einops==0.8.2",
+    "pre-commit==4.6.0",
+    "pytest==9.1.1",
+    "ruff==0.15.21",
+    "pyiqa==0.1.16",
 ]
 
-# RKNN conversion is typically done in a separate environment because
-# rknn-toolkit2 pins torch<=2.4.0, which conflicts with this project's
-# torch>=2.12.0 requirement. Install it manually there when needed.
+# RKNN conversion stays in a separate environment because rknn-toolkit2's
+# PyTorch requirement conflicts with this project's pinned training stack.
 
 [project.scripts]
 rk3588-mobile-sr = "rk3588_mobile_sr.cli:main"
@@ -36,10 +35,12 @@ rk3588-train = "rk3588_mobile_sr.train.unified:main"
 rk3588-export-onnx = "rk3588_mobile_sr.deploy.onnx:main"
 rk3588-eval-psnr = "rk3588_mobile_sr.eval.psnr:evaluate_cli"
 rk3588-convert-rknn = "rk3588_mobile_sr.deploy.rknn:main"
-rk3588-relu-audit = "rk3588_mobile_sr.deploy.relu_audit:main"
 rk3588-bench-rknn-activations = "rk3588_mobile_sr.deploy.act_fusion_bench:main"
 rk3588-build-rknn-calibration = "rk3588_mobile_sr.dev.build_mlvc_calibration:main"
 rk3588-generate-report-charts = "rk3588_mobile_sr.dev.generate_report_charts:main"
+
+[tool.uv]
+add-bounds = "exact"
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu132" }
@@ -52,10 +53,14 @@ url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.uv.extra-build-dependencies]
+rk3588-mobile-sr = ["meson==1.12.0", "ninja==1.13.0"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0", "meson==1.12.0", "ninja==1.13.0"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rk3588_mobile_sr"]
@@ -67,6 +72,8 @@ include = [
     "/README.md",
     "/LICENSE",
     "/AGENTS.md",
+    "/hatch_build.py",
+    "/scripts/setup_vmaf.sh",
 ]
 
 [tool.pytest.ini_options]
@@ -78,7 +85,7 @@ python_functions = ["test_*"]
 addopts = "-ra -q --tb=short"
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 100
 src = ["src", "tests", "scripts"]
 extend-exclude = [
