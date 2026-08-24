@@ -1,6 +1,8 @@
 """Tests for configuration loading and deploy contracts."""
 
-from rknn_super_resolution.config import AppConfig, default_config_path, load_config
+import pytest
+
+from rknn_super_resolution.config import AppConfig, DeployConfig, default_config_path, load_config
 
 
 def test_default_config_deploy_contract():
@@ -32,3 +34,17 @@ def test_load_config_from_bundled_yaml():
     assert cfg.data.dataset_description.endswith("frame_sequences.csv")
     assert cfg.model.in_channels == 3
     assert cfg.model.out_channels == 3
+
+
+@pytest.mark.parametrize("target", ["rk3576", "rk3588", "RK3588", "rv1126b", "RV1126B"])
+def test_deploy_config_accepts_tested_boards(target: str):
+    assert DeployConfig(target=target).target == target.lower()
+
+
+def test_deploy_config_does_not_restrict_toolkit_targets():
+    assert DeployConfig(target="RK9999").target == "rk9999"
+
+
+def test_deploy_config_rejects_empty_target():
+    with pytest.raises(ValueError, match="cannot be empty"):
+        DeployConfig(target="  ")

@@ -160,7 +160,7 @@ def save_pipeline() -> None:
         ("Stage 2\n蒸馏微调", "#2563eb"),
         ("Stage 3\nQAT 量化", "#9ca3af"),
         ("ONNX\n导出", "#9ca3af"),
-        ("RKNN\nRK3588", "#9ca3af"),
+        ("RKNN\nRockchip", "#9ca3af"),
     ]
 
     fig, ax = plt.subplots(figsize=(10, 2.4))

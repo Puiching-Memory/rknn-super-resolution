@@ -1,7 +1,7 @@
 [project]
 name = "rknn-super-resolution"
 version = "0.1.0"
-description = "RK3576 frozen-MLVC codec-aware Phase-RLFN 3x super-resolution"
+description = "Rockchip RKNN frozen-MLVC codec-aware Phase-RLFN 3x super-resolution"
 readme = "README.md"
 requires-python = "==3.13.*"
 license = { text = "MIT" }

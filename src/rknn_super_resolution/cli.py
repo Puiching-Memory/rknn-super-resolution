@@ -9,7 +9,7 @@ import typer
 
 app = typer.Typer(
     name="rknn-super-resolution",
-    help="RK3576 Phase-RLFN 3x video super-resolution: train, evaluate, export, deploy.",
+    help="Rockchip RKNN Phase-RLFN 3x video super-resolution: train, evaluate, export, deploy.",
     no_args_is_help=True,
 )
 

@@ -5,6 +5,7 @@ from rknn_super_resolution.deploy.act_fusion_bench import (
     _parse_fuse_notes,
     _parse_rknn_ops,
     format_table,
+    parse_args,
 )
 
 
@@ -65,3 +66,9 @@ def test_format_table_includes_fusion_and_psnr():
     assert "ConvRelu" in text
     assert "42.50 dB" in text
     assert "Mish" in text
+
+
+def test_cli_accepts_non_default_and_unlisted_targets():
+    assert parse_args(["--target", "RK3588"]).target == "rk3588"
+    assert parse_args(["--target", "RV1126B"]).target == "rv1126b"
+    assert parse_args(["--target", "RK9999"]).target == "rk9999"

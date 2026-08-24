@@ -1,6 +1,6 @@
-# RK3576 MLVC + Phase-RLFN 视频超分辨率
+# Rockchip RKNN MLVC + Phase-RLFN 视频超分辨率
 
-面向 RK3576 的 3× 视频超分辨率训练与部署工程。训练数据来自冻结
+已在 RK3576、RK3588 和 RV1126B 上测试的 3× 视频超分辨率训练与部署工程。训练数据来自冻结
 MLVC-S 的真实 P-frame 量化重建，而不是普通 bicubic 或传统视频解码帧。
 
 ```text
@@ -123,6 +123,15 @@ uv run rknn-super-resolution convert-rknn \
   --input_size '12,180,320;96,46,80' \
   --calib_dir data/rknn_calib.txt
 ```
+
+`--target` 会传给 RKNN Toolkit 的 `target_platform`（默认值由配置中的
+`deploy.target` 决定），项目不对 Toolkit 支持的 target 设置白名单。已测试
+`rk3576`、`rk3588` 和 `rv1126b`；RV1126B 需要 RKNN Toolkit2 2.3.2 或更高版本。
+同一个 ONNX 应针对每种目标板卡分别编译，并使用不同的 `--output` 保存产物，例如
+`phase_rlfn_sr_x3_rk3576.rknn`、`phase_rlfn_sr_x3_rk3588.rknn` 与
+`phase_rlfn_sr_x3_rv1126b.rknn`。RKNN 专用解释器可通过
+通用环境变量 `RKNN_PYTHON` 覆盖；旧的 `RK3576_RKNN_PYTHON` 和
+`RK3588_RKNN_PYTHON` 仍兼容。
 
 ## 分布式不变量
 

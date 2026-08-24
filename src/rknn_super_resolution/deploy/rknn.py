@@ -1,4 +1,4 @@
-"""Convert ONNX model to RKNN INT8 for RK3588."""
+"""Convert an ONNX model to RKNN for a supported Rockchip target."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from rknn_super_resolution.deploy.rknn_env import (
     resolve_rknn_python,
 )
 from rknn_super_resolution.deploy.rknn_eval import add_eval_args, run_post_build_eval
+from rknn_super_resolution.deploy.targets import TESTED_RKNN_TARGETS, normalize_rknn_target
 
 
 def import_rknn():
@@ -30,13 +31,21 @@ def import_rknn():
         ) from e
 
 
-def parse_args():
+def parse_args(argv: list[str] | None = None):
     cfg = load_config()
     deploy = cfg.deploy
     parser = argparse.ArgumentParser()
     parser.add_argument("--onnx", type=str, required=True)
     parser.add_argument("--output", type=str, default=deploy.rknn_output)
-    parser.add_argument("--target", type=str, default=deploy.target)
+    parser.add_argument(
+        "--target",
+        type=normalize_rknn_target,
+        default=deploy.target,
+        help=(
+            "RKNN Toolkit target_platform (default: %(default)s; tested: "
+            f"{', '.join(TESTED_RKNN_TARGETS)})."
+        ),
+    )
     parser.add_argument("--calib_dir", type=str, default=deploy.calib_dir)
     parser.add_argument("--input_size", type=str, default=_default_input_size(cfg))
     parser.add_argument(
@@ -88,7 +97,7 @@ def parse_args():
         "--python",
         type=str,
         default=None,
-        help="RKNN-dedicated Python interpreter (default: deploy.rknn_python or RK3588_RKNN_PYTHON).",
+        help="RKNN-dedicated Python interpreter (default: deploy.rknn_python or RKNN_PYTHON).",
     )
     parser.add_argument(
         "--encrypt",
@@ -113,7 +122,7 @@ def parse_args():
         help="Encrypted model path; default: {output_stem}.crypt.rknn (RKNN toolkit convention).",
     )
     add_eval_args(parser, cfg.model)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _warn_nhwc_onnx_output(onnx_path: Path) -> None:

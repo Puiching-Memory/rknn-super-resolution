@@ -90,6 +90,13 @@ class DeployConfig:
     rknn_crypt_level: int = 1
     codec_context: bool = True
 
+    def __post_init__(self) -> None:
+        # Import lazily so the general configuration module does not otherwise
+        # depend on deployment implementation details.
+        from rknn_super_resolution.deploy.targets import normalize_rknn_target
+
+        self.target = normalize_rknn_target(self.target)
+
 
 @dataclass
 class AppConfig:

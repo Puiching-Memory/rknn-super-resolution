@@ -25,6 +25,7 @@ import numpy as np
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.deploy.rknn_env import resolve_rknn_python
 from rknn_super_resolution.deploy.rknn_eval import _rknn_output_to_hwc, psnr_numpy
+from rknn_super_resolution.deploy.targets import TESTED_RKNN_TARGETS, normalize_rknn_target
 
 # ONNX export runs in the project env; RKNN build runs in .venv-rknn.
 DEFAULT_ACTIVATIONS = (
@@ -552,7 +553,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--input_h", type=int, default=64)
     parser.add_argument("--input_w", type=int, default=64)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--target", type=str, default="rk3588")
+    parser.add_argument(
+        "--target",
+        type=normalize_rknn_target,
+        default=deploy.target,
+        help=f"RKNN Toolkit target_platform (tested: {', '.join(TESTED_RKNN_TARGETS)}).",
+    )
     parser.add_argument(
         "--quantize",
         type=str,

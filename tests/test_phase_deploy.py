@@ -7,7 +7,7 @@ import torch
 
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.deploy.onnx import _CodecCore, _SRCore
-from rknn_super_resolution.deploy.rknn import _config_kwargs, _default_input_size
+from rknn_super_resolution.deploy.rknn import _config_kwargs, _default_input_size, parse_args
 from rknn_super_resolution.deploy.rknn_eval import (
     pixel_shuffle_nchw_to_hwc,
     pixel_unshuffle_hwc_to_nchw,
@@ -30,7 +30,7 @@ def test_numpy_phase_packing_uses_pixel_unshuffle_order() -> None:
     assert np.array_equal(pixel_shuffle_nchw_to_hwc(packed, 2), image)
 
 
-def test_rk3576_phase_defaults() -> None:
+def test_phase_defaults() -> None:
     cfg = load_config()
     assert _default_input_size(cfg) == "12,180,320;96,46,80"
     args = Namespace(
@@ -42,6 +42,13 @@ def test_rk3576_phase_defaults() -> None:
     kwargs = _config_kwargs(args, do_quantization=True)
     assert kwargs["mean_values"] == [[0] * 12, [0] * 96]
     assert kwargs["std_values"] == [[1] * 12, [1] * 96]
+
+
+def test_rknn_cli_accepts_tested_and_unlisted_boards() -> None:
+    assert parse_args(["--onnx", "model.onnx", "--target", "rk3576"]).target == "rk3576"
+    assert parse_args(["--onnx", "model.onnx", "--target", "RK3588"]).target == "rk3588"
+    assert parse_args(["--onnx", "model.onnx", "--target", "RV1126B"]).target == "rv1126b"
+    assert parse_args(["--onnx", "model.onnx", "--target", "RK9999"]).target == "rk9999"
 
 
 def test_onnx_wrappers_match_core_contracts() -> None:

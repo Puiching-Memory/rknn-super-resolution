@@ -1,4 +1,4 @@
-# RK3576 RGA-Bicubic + Phase-Residual MobileOne 方案
+# Rockchip RKNN RGA-Bicubic + Phase-Residual MobileOne 方案
 
 本项目只维护 RGA-Bicubic + Phase-Residual MobileOne 这一套模型与部署契约。
 
@@ -34,18 +34,18 @@
 `MobileOneSR.forward_core()`，ONNX/RKNN 图不包含 bicubic、PixelUnshuffle、
 PixelShuffle、add 或 clip。
 
-## RK3576 部署契约
+## Rockchip RKNN 部署契约
 
-| 项目 | 固定值 |
-| --- | --- |
-| RKNN target | `rk3576` |
-| RKNN VSR input | NCHW `1×20×180×320` |
-| RKNN SR-only input | NCHW `1×12×180×320` |
-| RKNN output | NCHW `1×108×180×320` signed residual |
-| CPU 前处理 | PixelUnshuffle(2) 通道重排 |
-| 并行主路径 | RGA bicubic，`360×640 -> 1080×1920` |
-| CPU 后处理 | PixelShuffle(6) + add + clip 融合 kernel |
-| NPU core | spatial stem + optional temporal adapter + 6 blocks + residual head |
+| 项目               | 固定值                                                              |
+| ------------------ | ------------------------------------------------------------------- |
+| RKNN target        | 不设白名单；已测试 `rk3576`、`rk3588` 和 `rv1126b`，每种板卡单独编译 |
+| RKNN VSR input     | NCHW `1×20×180×320`                                                 |
+| RKNN SR-only input | NCHW `1×12×180×320`                                                 |
+| RKNN output        | NCHW `1×108×180×320` signed residual                                |
+| CPU 前处理         | PixelUnshuffle(2) 通道重排                                          |
+| 并行主路径         | RGA bicubic，`360×640 -> 1080×1920`                                 |
+| CPU 后处理         | PixelShuffle(6) + add + clip 融合 kernel                            |
+| NPU core           | spatial stem + optional temporal adapter + 6 blocks + residual head |
 
 CPU 重排必须使用 PyTorch PixelShuffle/PixelUnshuffle 的通道顺序。RGA 与 NPU
 应从同一输入并行启动，等待二者完成后执行一次融合的 unpack/add/clip。Python
@@ -55,11 +55,11 @@ CPU 重排必须使用 PyTorch PixelShuffle/PixelUnshuffle 的通道顺序。RGA
 
 NPU residual core 的卷积规模为：
 
-| 指标 | SR-only | VSR |
-| --- | ---: | ---: |
-| 参数量（deploy graph） | 90,220 | 92,524 |
-| MAC | 5.176 GMAC | 5.309 GMAC |
-| 额外历史帧缓存 | 0 | 2×Y plane |
+| 指标                   |    SR-only |        VSR |
+| ---------------------- | ---------: | ---------: |
+| 参数量（deploy graph） |     90,220 |     92,524 |
+| MAC                    | 5.176 GMAC | 5.309 GMAC |
+| 额外历史帧缓存         |          0 |  2×Y plane |
 
 端到端必须按本契约重新实测：RGA 与 NPU 并行，计入同步和融合
 unpack/add/clip。模型仍需完成统一的 FP32→QAT 训练和验证集评估；阶段转换由
@@ -68,7 +68,7 @@ unpack/add/clip。模型仍需完成统一的 FP32→QAT 训练和验证集评�
 ## 环境边界
 
 - GPU 训练机使用项目主 `uv` 环境。
-- RK3576 板端不执行 `uv sync`，不安装 CUDA/PyTorch。
+- 目标板端不执行 `uv sync`，不安装 CUDA/PyTorch。
 - ONNX 导出默认使用 CPU，也可在训练机显式指定 `--device cuda`。
 - RKNN 转换使用隔离的 RKNN Toolkit 环境。
 
