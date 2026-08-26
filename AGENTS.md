@@ -5,7 +5,7 @@
 ## 信息从哪来
 
 - **怎么跑**：`scripts/*.sh`（运维入口）→ 内部 `uv run` + `torchrun -m ...`；完整 CLI 列表见 `pyproject.toml` `[project.scripts]`。
-- **默认配置**：`config/phase_rlfn_sr_x3.yaml`；CLI `--config` / 参数可覆盖。
+- **默认配置**：`src/rknn_super_resolution/config/phase_rlfn_sr_x3.yaml`；CLI `--config` / 参数可覆盖。
 - **架构与流程**：README；实现细节在 `src/rknn_super_resolution/` 对应模块。
 
 ## 环境与工具链
@@ -13,13 +13,13 @@
 - 只用 **`uv`** 管理依赖（`uv sync`）；除非用户明确要求，不用 `pip`。
 - `third_party/mlvc` 与 `third_party/vmaf` 是 git 子模块；克隆用 `--recurse-submodules`，不要再 gitignore 后自行 clone。
 - `uv sync` 经 hatch 钩子把 libvmaf 装进 `.local/`；验证指标由 `val_metric`（`vmaf`/`psnr`）全阶段统一，没有 `--no_vmaf`。
-- 训练栈绑定 **CUDA 13.0 / cu130**；RKNN 工具链与主环境 torch 版本冲突，**隔离在 `.venv-rknn`**，不并入主依赖。
+- 训练栈绑定 **CUDA 13.2 / cu132**；RKNN 工具链与主环境 torch 版本冲突，**隔离在 `.venv-rknn`**，不并入主依赖。
 - 校验改动：`uv run pytest`、`uv run ruff check src tests`（配置见 `pyproject.toml`）。
 
 ## 代码放哪、怎么改
 
 - 可安装代码一律在 **`src/rknn_super_resolution/`**（src layout）。
-- **`scripts/` 只放 bash**；Python 工具进包内（如 `dev/`）并注册 `[project.scripts]`，不要复活 `scripts/*.py`。
+- **`scripts/` 只放 bash**；Python 工具进包内（如 `dev/`）并注册 `[project.scripts]`，不要复活 `scripts/*.py`。一次性的小段逻辑允许内嵌 Python heredoc（如 `hf_upload.sh`），但可复用的 Python 工具仍进包内注册。
 - 先读周边模块再写：命名、类型、抽象层级与现有文件保持一致；改动范围限于任务所需，不顺手重构无关代码。
 - 行为有实质变化时再补测试；不测显然成立的事。
 - 不主动改 README / docs、不主动 `git commit`，除非用户要求或对外接口确实变了。
@@ -43,4 +43,4 @@
 
 ## SwanLab
 
-写追踪代码或查实验数据时，读 `.cursor/skills/swanlab-skill/`；项目内集成点在 `utils/swanlab_logging.py`。
+写追踪代码或查实验数据时，读 `.agents/skills/swanlab-skill/`；项目内集成点在 `utils/swanlab_logging.py`。
