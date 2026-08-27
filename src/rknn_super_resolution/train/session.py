@@ -12,9 +12,9 @@ import torch.nn as nn
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.distributed.context import DistributedContext
 from rknn_super_resolution.distributed.sync import rank0_section
-from rknn_super_resolution.distributed.validation import EarlyStopState, ValidationConfig
 from rknn_super_resolution.train.loop import StepTrainer
 from rknn_super_resolution.train.types import LoaderBundle, TrainConfig, TrainHooks
+from rknn_super_resolution.train.validation import EarlyStopState, ValidationConfig
 from rknn_super_resolution.utils.run_logger import logger, setup_run_logger
 from rknn_super_resolution.utils.swanlab_logging import (
     build_swanlab_run_config,

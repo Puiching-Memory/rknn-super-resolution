@@ -16,7 +16,6 @@ from rknn_super_resolution.distributed import (
     unwrap_model,
     wrap_training_model,
 )
-from rknn_super_resolution.distributed.validation import EarlyStopState, ValidationConfig
 from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT, PT2E_QAT_FORMAT
 from rknn_super_resolution.models.qat_utils import (
     disable_qat_observers,
@@ -24,6 +23,7 @@ from rknn_super_resolution.models.qat_utils import (
 )
 from rknn_super_resolution.train.session import TrainSession
 from rknn_super_resolution.train.types import TrainConfig, TrainHooks
+from rknn_super_resolution.train.validation import EarlyStopState, ValidationConfig
 from rknn_super_resolution.utils.run_logger import logger
 from rknn_super_resolution.utils.swanlab_logging import get_swanlab_run_id
 from rknn_super_resolution.utils.train_framework import (

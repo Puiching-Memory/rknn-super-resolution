@@ -12,15 +12,10 @@ from torch.utils.data import DataLoader, TensorDataset
 from rknn_super_resolution.distributed.context import DistributedContext, distributed_session
 from rknn_super_resolution.distributed.model import wrap_training_model
 from rknn_super_resolution.distributed.sync import rank0_section
-from rknn_super_resolution.distributed.validation import (
-    EarlyStopState,
-    ValidationConfig,
-    ValidationResult,
-    primary_metric_logs,
-)
 from rknn_super_resolution.models import PhaseRLFNSR
 from rknn_super_resolution.train.loop import StepTrainer
 from rknn_super_resolution.train.types import TrainConfig, TrainHooks
+from rknn_super_resolution.train.validation import ValidationResult
 from rknn_super_resolution.utils.train_framework import (
     load_training_module_state_dict,
     training_module_state_dict,
@@ -49,73 +44,12 @@ def test_rank0_section_non_main_skips_fn_still_barriers():
     mock_barrier.assert_called_once()
 
 
-def test_early_stop_improves_resets_patience():
-    state = EarlyStopState(enabled=True, patience=3, min_delta=0.1)
-    improved, stop = state.update(25.0)
-    assert improved and not stop
-    assert state.best_score == 25.0
-    assert state.patience_counter == 0
-
-    improved, stop = state.update(25.5)
-    assert improved and not stop
-    assert state.patience_counter == 0
-
-
-def test_primary_metric_logs_keeps_vmaf_out_of_best_psnr():
-    logs = primary_metric_logs(
-        primary_key="val/vmaf",
-        best_score=41.53,
-        psnr_at_best=31.35,
-    )
-    assert logs["val/best_score"] == 41.53
-    assert logs["val/best_vmaf"] == 41.53
-    assert logs["val/best_psnr"] == 31.35
-
-
-def test_early_stop_triggers_after_patience():
-    state = EarlyStopState(enabled=True, patience=2, min_delta=0.1)
-    state.update(20.0)
-
-    _, stop = state.update(20.05)
-    assert not stop
-    assert state.patience_counter == 1
-
-    _, stop = state.update(20.05)
-    assert stop
-    assert state.patience_counter == 2
-
-
-def test_early_stop_honors_minimum_evaluations():
-    state = EarlyStopState(
-        enabled=True,
-        patience=1,
-        min_delta=0.1,
-        min_evaluations=4,
-    )
-    state.update(20.0)
-    assert state.update(20.0)[1] is False
-    assert state.update(20.0)[1] is False
-    assert state.update(20.0)[1] is True
-    assert state.evaluations == 4
-
-
-def test_early_stop_disabled_never_stops():
-    state = EarlyStopState(enabled=False, patience=1, min_delta=0.1)
-    for psnr in (10.0, 9.0, 8.0):
-        _, stop = state.update(psnr)
-        assert not stop
-
-
 def test_distributed_context_world_size_one_no_collectives():
     ctx = DistributedContext(rank=0, world_size=1, device=torch.device("cpu"))
     assert ctx.is_main
     assert ctx.all_reduce_avg(3.5) == 3.5
     assert ctx.broadcast_bool(True) is True
     ctx.barrier()  # no-op
-
-
-def test_validation_config_defaults_to_yuv():
-    assert ValidationConfig().colorspace == "yuv"
 
 
 def test_step_trainer_runs_steps_and_validation(tmp_path):

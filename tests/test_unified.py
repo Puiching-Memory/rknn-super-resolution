@@ -8,7 +8,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from rknn_super_resolution.distributed.validation import EarlyStopState
 from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT, PT2E_QAT_FORMAT
 from rknn_super_resolution.train.unified import (
     FLOAT,
@@ -21,6 +20,7 @@ from rknn_super_resolution.train.unified import (
     resolve_training_args,
     validate_training_args,
 )
+from rknn_super_resolution.train.validation import EarlyStopState
 from rknn_super_resolution.utils.train_framework import resolve_model_args
 
 

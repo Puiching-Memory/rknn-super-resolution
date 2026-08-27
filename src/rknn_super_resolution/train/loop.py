@@ -11,13 +11,13 @@ from torch.utils.data import DataLoader
 
 from rknn_super_resolution.data.prefetch import BatchPrefetcher
 from rknn_super_resolution.distributed.context import DistributedContext
-from rknn_super_resolution.distributed.validation import (
+from rknn_super_resolution.models import SRInput, forward_sr, split_sr_input
+from rknn_super_resolution.train.types import TrainConfig, TrainHooks
+from rknn_super_resolution.train.validation import (
     EarlyStopState,
     ValidationConfig,
     ValidationRunner,
 )
-from rknn_super_resolution.models import SRInput, forward_sr, split_sr_input
-from rknn_super_resolution.train.types import TrainConfig, TrainHooks
 from rknn_super_resolution.utils.model_diagnostics import (
     ForwardDiagnosticsTracker,
     collect_training_diagnostics,
