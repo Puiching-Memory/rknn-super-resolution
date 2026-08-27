@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 from pathlib import Path
 
 import torch
@@ -54,16 +53,6 @@ def _to_device(
     else:
         model_input = current
     return model_input, hr.to(device, non_blocking=True)
-
-
-def _format_component_detail(metrics: dict[str, float]) -> str:
-    if "train/loss_charbonnier" not in metrics:
-        return ""
-    return (
-        f" | charb={metrics['train/loss_charbonnier']:.4f}"
-        f" | dct={metrics.get('train/loss_dct_weighted', 0.0):.4f}"
-        f" | kd={metrics.get('train/loss_kd_weighted', 0.0):.4f}"
-    )
 
 
 class StepTrainer:
@@ -169,7 +158,6 @@ class StepTrainer:
         diag_tracker = ForwardDiagnosticsTracker(self.model) if self.model_diag else None
 
         window_loss = 0.0
-        window_components: dict[str, float] = defaultdict(float)
         local_steps = 0
         pending_batch: tuple[SRInput, torch.Tensor] | None = None
 
@@ -202,36 +190,22 @@ class StepTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
                     with amp_autocast(self.train_accel):
                         prediction = forward_sr(self.model, lr)
-                        loss_result = self.hooks.objective(prediction, hr)
-                    if isinstance(loss_result, tuple):
-                        loss, step_metrics = loss_result
-                        if isinstance(step_metrics, dict):
-                            for key, value in step_metrics.items():
-                                window_components[key] += float(value)
-                    else:
-                        loss = loss_result
+                        loss = self.hooks.objective(prediction, hr)
                     run_backward(loss, self.optimizer, self.train_accel)
                     if self.hooks.post_step is not None:
                         self.hooks.post_step()
-                    if self.hooks.scheduler is not None:
-                        self.hooks.scheduler.step()
 
                 self.global_step += 1
                 local_steps += 1
                 window_loss += loss.item()
 
-                if self.hooks.on_step is not None:
-                    self.hooks.on_step(self.global_step)
-
                 if self.global_step % self.config.log_every == 0:
                     self._log_training_step(
                         window_loss,
                         local_steps,
-                        window_components,
                         diag_tracker,
                     )
                     window_loss = 0.0
-                    window_components.clear()
                     local_steps = 0
 
                 if self.val_loader is not None and self.global_step % self.config.val_every == 0:
@@ -293,33 +267,21 @@ class StepTrainer:
         self,
         window_loss: float,
         local_steps: int,
-        window_components: dict[str, float],
         diag_tracker: ForwardDiagnosticsTracker | None,
     ) -> None:
         avg_loss = self.ctx.all_reduce_avg(window_loss / local_steps)
         reduced: dict[str, float] = {"train/loss": avg_loss}
-        if self.hooks.scheduler is not None:
-            reduced["train/lr"] = self.hooks.scheduler.get_last_lr()[0]
-        elif self.ctx.is_main:
+        if self.ctx.is_main:
             reduced["train/lr"] = self.optimizer.param_groups[0]["lr"]
-        for key, value in window_components.items():
-            reduced[key] = self.ctx.all_reduce_avg(value / local_steps)
 
         if self.ctx.is_main:
-            if self.hooks.log_train_metrics is not None:
-                self.hooks.log_train_metrics(reduced, self.global_step)
-            else:
-                log_metrics(reduced, step=self.global_step)
-                lr_note = ""
-                if "train/lr" in reduced:
-                    lr_note = f" | lr={reduced['train/lr']:.6f}"
-                logger.info(
-                    "Step {} | loss={:.4f}{}{}",
-                    self.global_step,
-                    reduced["train/loss"],
-                    _format_component_detail(reduced),
-                    lr_note,
-                )
+            log_metrics(reduced, step=self.global_step)
+            logger.info(
+                "Step {} | loss={:.4f} | lr={:.6f}",
+                self.global_step,
+                reduced["train/loss"],
+                reduced["train/lr"],
+            )
 
         if diag_tracker is not None:
             diag = collect_training_diagnostics(self.model, diag_tracker)

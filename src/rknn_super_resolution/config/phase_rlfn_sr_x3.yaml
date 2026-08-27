@@ -18,9 +18,11 @@ data:
   mlvc_variant: "small"
   sequence_frames: 8
   q_indices: [0, 21, 42, 63]
-  val_fraction: 0.01
-  val_samples: 16
+  val_fraction: 0.05
+  test_fraction: 0.05
+  val_samples: 32
   split_seed: 42
+  split_manifest: "data/OpenVidHD/openvidhd_split_v1.json"
   lr_size: [360, 640]
   hr_size: [1080, 1920]
   colorspace: "yuv"
@@ -54,7 +56,6 @@ training:
   clip_min: -1.0
   clip_max: 1.0
   ema_decay: 0.999
-  backend: "qnnpack"
   val_metric: "vmaf"
 
 deploy:

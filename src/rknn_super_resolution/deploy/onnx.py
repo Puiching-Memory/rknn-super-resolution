@@ -7,12 +7,12 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.export import Dim
 
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.deploy.export_prep import prepare_float_for_export
 from rknn_super_resolution.models import PhaseRLFNSR
-from rknn_super_resolution.models.qat_utils import load_qat_checkpoint_for_export
+from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT, PT2E_QAT_FORMAT
+from rknn_super_resolution.models.qat_utils import load_qat_weights_for_rknn_export
 
 
 class _SRCore(nn.Module):
@@ -47,12 +47,9 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=cfg.deploy.codec_context,
     )
-    parser.add_argument("--from-qat", action="store_true", help="load a prepared QAT checkpoint")
-    parser.add_argument("--backend", default=cfg.training.backend)
     parser.add_argument("--input_h", type=int, default=cfg.deploy.input_h)
     parser.add_argument("--input_w", type=int, default=cfg.deploy.input_w)
     parser.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
-    parser.add_argument("--static", action="store_true")
     parser.add_argument("--weight-clip", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--clip-min", type=float, default=cfg.training.clip_min)
     parser.add_argument("--clip-max", type=float, default=cfg.training.clip_max)
@@ -75,9 +72,11 @@ def main() -> None:
         codec_upsample_factor=cfg.model.codec_upsample_factor,
     ).to(device)
     raw = torch.load(args.weight, map_location=device, weights_only=False)
-    state_dict = raw.get("state_dict", raw) if isinstance(raw, dict) else None
+    if not isinstance(raw, dict) or not {"graph_format", "state_dict"}.issubset(raw):
+        raise TypeError(f"Expected a versioned model checkpoint in {args.weight}")
+    state_dict = raw["state_dict"]
     if not isinstance(state_dict, dict):
-        raise TypeError(f"Unsupported checkpoint format in {args.weight}")
+        raise TypeError(f"Invalid checkpoint state_dict in {args.weight}")
     if args.input_h % args.phase_factor or args.input_w % args.phase_factor:
         raise ValueError("input_h and input_w must be divisible by phase_factor")
     core_h = args.input_h // args.phase_factor
@@ -88,23 +87,27 @@ def main() -> None:
     codec = torch.randn(1, model.codec_feature_channels, codec_h, codec_w, device=device)
     example_inputs = (phases, codec) if args.codec_context else (phases,)
 
-    if args.from_qat:
-        model = load_qat_checkpoint_for_export(
-            model, state_dict, example_inputs, backend=args.backend
+    graph_format = raw["graph_format"]
+    if graph_format == PT2E_QAT_FORMAT:
+        load_qat_weights_for_rknn_export(model, state_dict)
+        prepare_float_for_export(
+            model,
+            clip_min=args.clip_min if args.weight_clip else None,
+            clip_max=args.clip_max if args.weight_clip else None,
         )
-    else:
+    elif graph_format == FLOAT_GRAPH_FORMAT:
         model.load_state_dict(state_dict, strict=True)
         prepare_float_for_export(
             model,
             clip_min=args.clip_min if args.weight_clip else None,
             clip_max=args.clip_max if args.weight_clip else None,
         )
+    else:
+        raise ValueError(f"Unsupported checkpoint graph format: {graph_format}")
 
     wrapper: nn.Module = _CodecCore(model) if args.codec_context else _SRCore(model)
+    wrapper.eval()
     input_names = ["phases", "codec_feature"] if args.codec_context else ["phases"]
-    dynamic_shapes = [{0: Dim("batch"), 2: Dim("phase_height"), 3: Dim("phase_width")}]
-    if args.codec_context:
-        dynamic_shapes.append({0: Dim("batch"), 2: Dim("codec_height"), 3: Dim("codec_width")})
     export_kwargs: dict = {
         "input_names": input_names,
         "output_names": ["phase_residual"],
@@ -112,8 +115,6 @@ def main() -> None:
         "dynamo": True,
         "external_data": False,
     }
-    if not args.static:
-        export_kwargs["dynamic_shapes"] = tuple(dynamic_shapes)
 
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -980,16 +980,10 @@ def run_final_sr_preview(
 
     if checkpoint is not None and checkpoint.is_file():
         raw = torch.load(checkpoint, map_location=device, weights_only=False)
-        if isinstance(raw, dict) and "state_dict" in raw:
-            state = raw["state_dict"]
-            ckpt_step = int(raw.get("step", step))
-        elif isinstance(raw, dict):
-            state = raw
-            ckpt_step = step
-        else:
-            raise TypeError(f"Unsupported checkpoint format: {checkpoint}")
-        load_training_module_state_dict(model, state)
-        step = ckpt_step
+        if not isinstance(raw, dict) or not {"graph_format", "state_dict"}.issubset(raw):
+            raise TypeError(f"Expected a versioned model checkpoint: {checkpoint}")
+        load_training_module_state_dict(model, raw["state_dict"])
+        step = int(raw.get("step", step))
         logger.info("final sr preview loading {}", checkpoint)
 
     panels = collect_sr_validation_panels(

@@ -9,10 +9,10 @@ import torch
 import torch.nn as nn
 
 from rknn_super_resolution.distributed.validation import EarlyStopState
+from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT, PT2E_QAT_FORMAT
 from rknn_super_resolution.train.unified import (
     FLOAT,
     QAT_OBSERVE,
-    QAT_STABLE,
     _checkpoint,
     _load_raw,
     _stop_reason,
@@ -27,10 +27,6 @@ from rknn_super_resolution.utils.train_framework import resolve_model_args
 def _parsed_args(monkeypatch, *cli: str):
     monkeypatch.setattr(sys, "argv", ["rknn-super-resolution-train", *cli])
     return resolve_training_args(resolve_model_args(parse_args()))
-
-
-def test_training_phases_are_the_unified_state_machine():
-    assert (FLOAT, QAT_OBSERVE, QAT_STABLE) == ("float", "qat_observe", "qat_stable")
 
 
 def test_stop_reason_distinguishes_plateau_and_safety_cap():
@@ -49,6 +45,7 @@ def test_checkpoint_records_phase_and_step():
     optimizer = torch.optim.Adam(model.parameters())
     payload = _checkpoint(model, optimizer, step=42, phase=QAT_OBSERVE)
     assert payload["phase"] == QAT_OBSERVE
+    assert payload["graph_format"] == PT2E_QAT_FORMAT
     assert payload["step"] == 42
     assert "state_dict" in payload
     assert "optimizer" in payload
@@ -66,6 +63,7 @@ def test_load_raw_requires_unified_checkpoint(tmp_path):
 
     torch.save(
         {
+            "graph_format": FLOAT_GRAPH_FORMAT,
             "state_dict": {"w": torch.tensor(1.0)},
             "optimizer": {},
             "phase": FLOAT,
@@ -76,6 +74,10 @@ def test_load_raw_requires_unified_checkpoint(tmp_path):
     raw = _load_raw(path, torch.device("cpu"))
     assert raw["phase"] == FLOAT
     assert raw["step"] == 3
+
+    torch.save({**raw, "graph_format": PT2E_QAT_FORMAT}, path)
+    with pytest.raises(ValueError, match="does not match phase"):
+        _load_raw(path, torch.device("cpu"))
 
 
 def test_validate_training_args_rejects_lr_not_aligned_to_phase(monkeypatch):
@@ -92,14 +94,6 @@ def test_validate_training_args_rejects_short_safety_cap(monkeypatch):
     args.float_min_evaluations = 12
     with pytest.raises(ValueError, match="float_safety_max_steps"):
         validate_training_args(args)
-
-
-def test_removed_no_vmaf_flag_is_rejected(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["rknn-super-resolution-train", "--no_vmaf"])
-    with pytest.raises(SystemExit):
-        parse_args()
-    args = _parsed_args(monkeypatch)
-    assert not hasattr(args, "no_vmaf")
 
 
 def test_default_val_metric_is_vmaf_for_all_phases(monkeypatch):

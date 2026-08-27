@@ -199,7 +199,7 @@ def _load_calib_rgb(
 ) -> list[np.ndarray]:
     try:
         import cv2
-    except ImportError as exc:  # pragma: no cover
+    except ImportError as exc:  # pragma: no cover - isolated RKNN env diagnostic
         raise ImportError("opencv-python is required for calibration image loading") from exc
 
     images: list[np.ndarray] = []

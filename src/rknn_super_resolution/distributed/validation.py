@@ -25,7 +25,6 @@ from rknn_super_resolution.utils.vmaf_metric import DEFAULT_VMAF_MODEL
 class ValidationConfig:
     scale: int = 3
     extended: bool = True
-    compute_dists: bool = False
     compute_vmaf: bool = True
     vmaf_model: str = DEFAULT_VMAF_MODEL
     # Encode-side CAMBI size (H, W) for VMAF v1; LR canvas before SR display.
@@ -113,7 +112,7 @@ class ValidationRunner:
     config: ValidationConfig
     early_stop: EarlyStopState
     save_dir: Path | None = None
-    save_best_extra: Callable[[Path], None] | None = None
+    save_best_extra: Callable[[Path, int], None] | None = None
     save_best: Callable[[Path, int], None] | None = None
 
     def run(self, step: int) -> ValidationResult | None:
@@ -129,7 +128,6 @@ class ValidationRunner:
             self.ctx.rank,
             self.ctx.world_size,
             scale=self.config.scale,
-            compute_dists=self.config.compute_dists,
             compute_vmaf=self.config.compute_vmaf,
             vmaf_model=self.config.vmaf_model,
             vmaf_enc_size=self.config.vmaf_enc_size,
@@ -200,8 +198,6 @@ class ValidationRunner:
                 )
                 if val_metrics.vmaf is not None:
                     detail = f" | VMAF={val_metrics.vmaf:.2f}" + detail
-                if val_metrics.dists is not None:
-                    detail += f" | DISTS={val_metrics.dists:.4f}"
             patience_note = ""
             if self.early_stop.enabled:
                 patience_note = (
@@ -226,7 +222,7 @@ class ValidationRunner:
                 else:
                     torch.save(training_module_state_dict(self.model), best_path)
                 if self.save_best_extra is not None:
-                    self.save_best_extra(best_path)
+                    self.save_best_extra(best_path, step)
 
             result.metrics = metrics
 

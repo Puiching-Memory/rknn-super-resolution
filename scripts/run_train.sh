@@ -161,10 +161,7 @@ if (( uses_vmaf )); then
   ensure_vmaf
 fi
 
-# Temporary host workaround: translated IOMMU blocks PCIe peer DMA on this machine.
-export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
-
-echo "[$(date -Is)] starting unified training ${NPROC}gpu experiment=$EXP_NAME devices=${CUDA_VISIBLE_DEVICES:-all} nccl_p2p_disable=$NCCL_P2P_DISABLE" | tee -a "$CONSOLE_LOG"
+echo "[$(date -Is)] starting unified training ${NPROC}gpu experiment=$EXP_NAME devices=${CUDA_VISIBLE_DEVICES:-all} nccl_p2p_disable=${NCCL_P2P_DISABLE:-auto}" | tee -a "$CONSOLE_LOG"
 
 exec >>"$CONSOLE_LOG" 2>&1
 run_torchrun "$NPROC" -m rknn_super_resolution.train.unified \

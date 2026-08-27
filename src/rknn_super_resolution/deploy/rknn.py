@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
+
+import numpy as np
 
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.deploy.rknn_env import (
@@ -47,6 +50,12 @@ def parse_args(argv: list[str] | None = None):
         ),
     )
     parser.add_argument("--calib_dir", type=str, default=deploy.calib_dir)
+    parser.add_argument(
+        "--smoke_input",
+        type=str,
+        default=None,
+        help="run one RKNN simulator inference from the first row of this calibration list",
+    )
     parser.add_argument("--input_size", type=str, default=_default_input_size(cfg))
     parser.add_argument(
         "--quantize",
@@ -62,8 +71,12 @@ def parse_args(argv: list[str] | None = None):
         choices=["channel", "layer"],
         help="Weight quantization granularity (per-channel is usually more accurate).",
     )
-    parser.add_argument("--do_quantization", action="store_true", default=True)
-    parser.add_argument("--no_quantization", action="store_true")
+    parser.add_argument(
+        "--quantization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="enable RKNN PTQ for the float ONNX (default: enabled)",
+    )
     parser.add_argument(
         "--hybrid",
         type=str,
@@ -144,6 +157,16 @@ def _warn_nhwc_onnx_output(onnx_path: Path) -> None:
         )
 
 
+def _onnx_has_qdq(onnx_path: Path) -> bool:
+    try:
+        import onnx
+    except ImportError as exc:
+        raise ImportError("onnx is required to inspect the RKNN input graph") from exc
+    model = onnx.load(str(onnx_path), load_external_data=False)
+    op_types = {node.op_type for node in model.graph.node}
+    return {"QuantizeLinear", "DequantizeLinear"}.issubset(op_types)
+
+
 def _stem_from_onnx(onnx_path: Path) -> str:
     return onnx_path.stem
 
@@ -163,6 +186,65 @@ def _resolve_calib_dir(path: str) -> str:
     if not calib.is_absolute():
         calib = (Path.cwd() / calib).resolve()
     return str(calib)
+
+
+def _load_smoke_inputs(
+    dataset: str | Path,
+    input_sizes: list[tuple[int, int, int]],
+) -> list[np.ndarray]:
+    dataset_path = Path(dataset).expanduser().resolve()
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"smoke input list not found: {dataset_path}")
+    rows = [
+        line
+        for line in dataset_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if not rows:
+        raise ValueError(f"smoke input list is empty: {dataset_path}")
+    paths = shlex.split(rows[0])
+    if len(paths) != len(input_sizes):
+        raise ValueError(
+            f"smoke input count {len(paths)} does not match model input count {len(input_sizes)}"
+        )
+
+    arrays: list[np.ndarray] = []
+    for raw_path, (channels, height, width) in zip(paths, input_sizes, strict=True):
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        array = np.load(path)
+        expected_shape = (1, channels, height, width)
+        if array.shape != expected_shape:
+            raise ValueError(
+                f"smoke input {path} has shape {array.shape}, expected {expected_shape}"
+            )
+        if not np.isfinite(array).all():
+            raise ValueError(f"smoke input contains non-finite values: {path}")
+        arrays.append(array)
+    return arrays
+
+
+def _run_smoke_inference(
+    rknn,
+    dataset: str | Path,
+    input_sizes: list[tuple[int, int, int]],
+) -> None:
+    inputs = _load_smoke_inputs(dataset, input_sizes)
+    outputs = rknn.inference(inputs=inputs, data_format="nchw")
+    if not outputs:
+        raise RuntimeError("RKNN simulator returned no outputs")
+    output = np.asarray(outputs[0])
+    expected_h, expected_w = input_sizes[0][1:]
+    if output.ndim != 4 or output.shape[0] != 1 or output.shape[-2:] != (expected_h, expected_w):
+        raise RuntimeError(f"unexpected RKNN simulator output shape: {output.shape}")
+    if not np.isfinite(output).all():
+        raise RuntimeError("RKNN simulator output contains non-finite values")
+    print(
+        "RKNN simulator smoke passed: "
+        f"shape={output.shape}, dtype={output.dtype}, "
+        f"range=[{float(output.min()):.6f}, {float(output.max()):.6f}]"
+    )
 
 
 def _config_kwargs(args: argparse.Namespace, *, do_quantization: bool) -> dict:
@@ -307,20 +389,26 @@ def _default_input_size(cfg) -> str:
 
 def main():
     args = parse_args()
+    onnx_path = Path(args.onnx)
+    if _onnx_has_qdq(onnx_path):
+        raise ValueError(
+            "PT2E Q/DQ ONNX is not supported for RKNN deployment because "
+            "Toolkit2 lowers the residual path to FP16; export the versioned "
+            "checkpoint with `export-onnx` and use RKNN PTQ"
+        )
+    do_quantization = args.quantization
     rknn_python = resolve_rknn_python(args.python)
     if needs_rknn_reexec(rknn_python):
         reexec_in_rknn_python(rknn_python, sys.argv[1:])
 
     rknn_class = import_rknn()
-    do_quantization = args.do_quantization and not args.no_quantization
     args.calib_dir = _resolve_calib_dir(args.calib_dir)
-    _parse_input_size(args.input_size)
-    onnx_path = Path(args.onnx)
+    input_sizes = _parse_input_size(args.input_size)
     use_hybrid = args.hybrid is not None or args.hybrid_cfg is not None
     if use_hybrid and not do_quantization:
-        print("Hybrid quantization requires INT8 PTQ (--no_quantization conflicts).")
+        print("Hybrid quantization requires a float ONNX with RKNN PTQ enabled.")
         sys.exit(1)
-    quant_mode = "INT8+FP16 hybrid" if use_hybrid else ("INT8" if do_quantization else "FP16")
+    quant_mode = "INT8+FP16 hybrid" if use_hybrid else "INT8 PTQ" if do_quantization else "FP16"
 
     rknn = rknn_class(verbose=True)
     try:
@@ -362,12 +450,17 @@ def main():
                 print("Build model failed!")
                 sys.exit(ret)
 
-        if args.eval:
-            print("--> Evaluating accuracy (RKNN simulator)")
+        if args.smoke_input or args.eval:
+            print("--> Initializing RKNN simulator")
             ret = rknn.init_runtime()
             if ret != 0:
-                print("Init runtime for eval failed!")
+                print("Init RKNN simulator failed!")
                 sys.exit(ret)
+        if args.smoke_input:
+            print("--> Running RKNN simulator smoke inference")
+            _run_smoke_inference(rknn, args.smoke_input, input_sizes)
+        if args.eval:
+            print("--> Evaluating accuracy (RKNN simulator)")
             run_post_build_eval(args, rknn, quant_mode=quant_mode)
 
         _export_rknn(

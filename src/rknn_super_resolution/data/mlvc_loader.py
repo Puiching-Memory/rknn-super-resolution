@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import torch
 import torch.distributed as dist
@@ -15,12 +15,16 @@ from rknn_super_resolution.config import DataConfig
 from rknn_super_resolution.data.decode import FrameDecoder, TorchCodecFrameDecoder
 from rknn_super_resolution.data.mlvc_runtime import FrozenMLVCRuntime, MLVCReconstruction
 from rknn_super_resolution.data.openvid import (
+    OpenVidSequence,
     OpenVidSequenceDataset,
     collate_openvid_batch,
     load_openvid_index,
+    select_unique_source_indices,
     split_sequence_indices,
 )
+from rknn_super_resolution.data.yuv_utils import rgb_to_yuv444, yuv444_to_rgb
 from rknn_super_resolution.models import SRInput
+from rknn_super_resolution.utils.run_logger import logger
 
 
 class MLVCRuntime(Protocol):
@@ -29,20 +33,12 @@ class MLVCRuntime(Protocol):
 
 def rgb_to_mlvc_ycbcr(rgb: torch.Tensor) -> torch.Tensor:
     """Convert RGB [0,1] to the BT.709 full-range representation used by MLVC."""
-    r, g, b = rgb.chunk(3, dim=-3)
-    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
-    cb = 0.5 * (b - y) / (1.0 - 0.0722) + 0.5
-    cr = 0.5 * (r - y) / (1.0 - 0.2126) + 0.5
-    return torch.cat((y, cb, cr), dim=-3).clamp_(0.0, 1.0)
+    return rgb_to_yuv444(rgb * 255.0) / 255.0
 
 
 def mlvc_ycbcr_to_rgb(ycbcr: torch.Tensor) -> torch.Tensor:
     """Convert MLVC BT.709 full-range YCbCr [0,1] to RGB [0,1]."""
-    y, cb, cr = ycbcr.chunk(3, dim=-3)
-    r = y + (2.0 - 2.0 * 0.2126) * (cr - 0.5)
-    b = y + (2.0 - 2.0 * 0.0722) * (cb - 0.5)
-    g = (y - 0.2126 * r - 0.0722 * b) / 0.7152
-    return torch.cat((r, g, b), dim=-3).clamp_(0.0, 1.0)
+    return yuv444_to_rgb(ycbcr * 255.0) / 255.0
 
 
 def _map_time(frames: torch.Tensor, fn: Callable[[torch.Tensor], torch.Tensor]) -> torch.Tensor:
@@ -177,12 +173,14 @@ class _InfiniteMLVCIterator(Iterator[MLVCDeviceBatch]):
         self.processor = processor
         self.sampler = sampler
         self.epoch = 0
-        self.iterator = iter(loader)
+        self.iterator: Iterator[dict[str, Any]] | None = iter(loader)
 
     def __iter__(self) -> _InfiniteMLVCIterator:
         return self
 
     def __next__(self) -> MLVCDeviceBatch:
+        if self.iterator is None:
+            raise StopIteration
         try:
             batch = next(self.iterator)
         except StopIteration:
@@ -200,9 +198,7 @@ class _InfiniteMLVCIterator(Iterator[MLVCDeviceBatch]):
         return MLVCDeviceBatch(lr, hr, ready_event)
 
     def close(self) -> None:
-        shutdown = getattr(self.iterator, "_shutdown_workers", None)
-        if shutdown is not None:
-            shutdown()
+        self.iterator = None
 
 
 @dataclass
@@ -224,9 +220,11 @@ class MLVCValidationLoader:
         self,
         loader: DataLoader,
         processor: MLVCBatchProcessor,
+        decoder: FrameDecoder | None = None,
     ) -> None:
         self.loader = loader
         self.processor = processor
+        self.decoder = decoder
         self.dataset = loader.dataset
         self.sampler = loader.sampler
 
@@ -237,10 +235,77 @@ class MLVCValidationLoader:
     def __len__(self) -> int:
         return len(self.loader)
 
+    def close(self) -> None:
+        if self.decoder is not None:
+            self.decoder.close()
+
 
 def _resolve(path: str, root: Path) -> Path:
     candidate = Path(path)
     return candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+
+
+def _load_openvid_splits(
+    data: DataConfig,
+    *,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    project_root: Path,
+) -> tuple[list[OpenVidSequence], list[int], list[int], list[int], Path | None]:
+    description = _resolve(data.dataset_description, project_root)
+    video_root = _resolve(data.video_root, project_root) if data.video_root else description.parent
+    sequences = load_openvid_index(description, video_root=video_root)
+    manifest = _resolve(data.split_manifest, project_root) if data.split_manifest else None
+    split_kwargs = {
+        "val_fraction": data.val_fraction,
+        "test_fraction": data.test_fraction,
+        "seed": data.split_seed,
+        "manifest_path": manifest,
+    }
+    distributed = world_size > 1 and dist.is_initialized()
+    if distributed and manifest is not None:
+        if rank == 0:
+            split_sequence_indices(sequences, **split_kwargs)
+        if device.type == "cuda" and device.index is not None:
+            dist.barrier(device_ids=[device.index])
+        else:
+            dist.barrier()
+    train_indices, val_indices, test_indices = split_sequence_indices(sequences, **split_kwargs)
+    return sequences, train_indices, val_indices, test_indices, manifest
+
+
+def _build_mlvc_processor(
+    data: DataConfig,
+    *,
+    device: torch.device,
+    scale: int,
+    colorspace: str,
+    project_root: Path,
+) -> tuple[MLVCBatchProcessor, TorchCodecFrameDecoder]:
+    runtime = FrozenMLVCRuntime(
+        repo=_resolve(data.mlvc_repo, project_root),
+        checkpoint=_resolve(data.mlvc_checkpoint, project_root),
+        variant=data.mlvc_variant,
+        device=device,
+        amp=data.mlvc_amp,
+    )
+    decoder = TorchCodecFrameDecoder(
+        device,
+        lr_size=data.lr_size,
+        hr_size=data.hr_size,
+    )
+    processor = MLVCBatchProcessor(
+        runtime,
+        decoder=decoder,
+        device=device,
+        q_indices=data.q_indices,
+        colorspace=colorspace,
+        scale=scale,
+        codec_context=data.codec_context,
+        codec_dropout=data.codec_dropout,
+    )
+    return processor, decoder
 
 
 def build_mlvc_loaders(
@@ -256,11 +321,24 @@ def build_mlvc_loaders(
     world_size: int,
     project_root: Path,
 ) -> tuple[MLVCTrainLoader, MLVCValidationLoader]:
-    description = _resolve(data.dataset_description, project_root)
-    video_root = _resolve(data.video_root, project_root) if data.video_root else description.parent
-    sequences = load_openvid_index(description, video_root=video_root)
-    train_indices, val_indices = split_sequence_indices(
-        len(sequences), val_fraction=data.val_fraction, seed=data.split_seed
+    sequences, train_indices, val_indices, test_indices, manifest = _load_openvid_splits(
+        data,
+        device=device,
+        rank=rank,
+        world_size=world_size,
+        project_root=project_root,
+    )
+    val_indices = select_unique_source_indices(sequences, val_indices)
+    test_indices = select_unique_source_indices(sequences, test_indices)
+    if data.val_samples <= 0:
+        raise ValueError("val_samples must be positive and counts independent source videos")
+    logger.info(
+        "OpenVidHD source split: train={} validation={}/{} test={} manifest={}",
+        len({sequences[index].path for index in train_indices}),
+        min(data.val_samples, len(val_indices)),
+        len(val_indices),
+        len(test_indices),
+        manifest or "disabled",
     )
     train_dataset = OpenVidSequenceDataset(
         sequences,
@@ -271,7 +349,6 @@ def build_mlvc_loaders(
         training_split=True,
         augment=train_aug,
     )
-    val_base_count = max(1, data.val_samples // len(data.q_indices))
     val_dataset = OpenVidSequenceDataset(
         sequences,
         indices=val_indices,
@@ -281,7 +358,7 @@ def build_mlvc_loaders(
         training_split=False,
         augment=False,
         q_indices=data.q_indices,
-        max_samples=val_base_count,
+        max_samples=data.val_samples,
     )
 
     distributed = world_size > 1 and dist.is_initialized()
@@ -298,7 +375,7 @@ def build_mlvc_loaders(
     worker_args = {
         "num_workers": data.num_workers,
         "pin_memory": True,
-        "persistent_workers": data.num_workers > 0,
+        "persistent_workers": False,
         "collate_fn": collate_openvid_batch,
     }
     train_cpu_loader = DataLoader(
@@ -322,30 +399,92 @@ def build_mlvc_loaders(
         **worker_args,
     )
 
-    runtime = FrozenMLVCRuntime(
-        repo=_resolve(data.mlvc_repo, project_root),
-        checkpoint=_resolve(data.mlvc_checkpoint, project_root),
-        variant=data.mlvc_variant,
+    processor, decoder = _build_mlvc_processor(
+        data,
         device=device,
-        amp=data.mlvc_amp,
-    )
-    decoder = TorchCodecFrameDecoder(
-        device,
-        lr_size=data.lr_size,
-        hr_size=data.hr_size,
-    )
-    processor = MLVCBatchProcessor(
-        runtime,
-        decoder=decoder,
-        device=device,
-        q_indices=data.q_indices,
-        colorspace=colorspace,
         scale=scale,
-        codec_context=data.codec_context,
-        codec_dropout=data.codec_dropout,
+        colorspace=colorspace,
+        project_root=project_root,
     )
     train_iterator = _InfiniteMLVCIterator(train_cpu_loader, processor, train_sampler)
     return (
         MLVCTrainLoader(train_iterator, decoder),
         MLVCValidationLoader(val_cpu_loader, processor),
     )
+
+
+def build_mlvc_evaluation_loader(
+    data: DataConfig,
+    *,
+    split: Literal["validation", "test"],
+    device: torch.device,
+    scale: int,
+    colorspace: str,
+    batch_size: int,
+    rank: int,
+    world_size: int,
+    project_root: Path,
+) -> MLVCValidationLoader:
+    """Build an explicit held-out validation or test loader without a training loader."""
+    sequences, _train_indices, val_indices, test_indices, manifest = _load_openvid_splits(
+        data,
+        device=device,
+        rank=rank,
+        world_size=world_size,
+        project_root=project_root,
+    )
+    if batch_size <= 0:
+        raise ValueError("evaluation batch_size must be positive")
+    if split == "validation":
+        indices = select_unique_source_indices(sequences, val_indices)
+        max_sources = data.val_samples
+    elif split == "test":
+        indices = select_unique_source_indices(sequences, test_indices)
+        max_sources = None
+    else:
+        raise ValueError(f"unsupported OpenVidHD evaluation split: {split}")
+
+    dataset = OpenVidSequenceDataset(
+        sequences,
+        indices=indices,
+        sequence_frames=data.sequence_frames,
+        lr_size=data.lr_size,
+        hr_size=data.hr_size,
+        training_split=False,
+        augment=False,
+        q_indices=data.q_indices,
+        max_samples=max_sources,
+    )
+    distributed = world_size > 1 and dist.is_initialized()
+    sampler = (
+        DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        if distributed
+        else None
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        shuffle=False,
+        drop_last=False,
+        num_workers=data.num_workers,
+        pin_memory=True,
+        persistent_workers=False,
+        collate_fn=collate_openvid_batch,
+    )
+    processor, decoder = _build_mlvc_processor(
+        data,
+        device=device,
+        scale=scale,
+        colorspace=colorspace,
+        project_root=project_root,
+    )
+    logger.info(
+        "OpenVidHD {} evaluation: sources={} q_indices={} samples={} manifest={}",
+        split,
+        len(dataset.sequences),
+        len(data.q_indices),
+        len(dataset),
+        manifest or "disabled",
+    )
+    return MLVCValidationLoader(loader, processor, decoder)

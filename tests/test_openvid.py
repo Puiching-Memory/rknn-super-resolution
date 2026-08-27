@@ -9,11 +9,13 @@ import pytest
 import torch
 
 from rknn_super_resolution.data.openvid import (
+    OpenVidSequence,
     OpenVidSequenceDataset,
     collate_openvid_batch,
     crop_box,
     load_openvid_frame_sequences,
     load_openvid_index,
+    select_unique_source_indices,
     split_sequence_indices,
 )
 
@@ -67,14 +69,85 @@ def _row(
     }
 
 
-def test_split_sequence_indices_is_stable_and_disjoint():
-    first = split_sequence_indices(100, val_fraction=0.1, seed=42)
-    second = split_sequence_indices(100, val_fraction=0.1, seed=42)
-    train_indices, val_indices = first
+def _sequence(path: str, *, start_frame: int = 0) -> OpenVidSequence:
+    return OpenVidSequence(
+        path=path,
+        n_frames=64,
+        start_frame=start_frame,
+        width=1920,
+        height=1080,
+        bbox=(0, 0, 1920, 1080),
+    )
+
+
+def test_split_sequence_indices_is_stable_and_disjoint_by_source():
+    sequences = [
+        _sequence("a.mp4"),
+        _sequence("a.mp4", start_frame=64),
+        _sequence("b.mp4"),
+        _sequence("c.mp4"),
+        _sequence("d.mp4"),
+        _sequence("d.mp4", start_frame=64),
+        _sequence("e.mp4"),
+        _sequence("f.mp4"),
+    ]
+    first = split_sequence_indices(sequences, val_fraction=0.25, test_fraction=0.25, seed=42)
+    second = split_sequence_indices(sequences, val_fraction=0.25, test_fraction=0.25, seed=42)
+    train_indices, val_indices, test_indices = first
     assert first == second
-    assert len(train_indices) == 90
-    assert len(val_indices) == 10
     assert set(train_indices).isdisjoint(val_indices)
+    assert set(train_indices).isdisjoint(test_indices)
+    assert set(val_indices).isdisjoint(test_indices)
+    assert set(train_indices) | set(val_indices) | set(test_indices) == set(range(len(sequences)))
+    train_sources = {sequences[index].path for index in train_indices}
+    val_sources = {sequences[index].path for index in val_indices}
+    test_sources = {sequences[index].path for index in test_indices}
+    assert len(train_sources) == 2
+    assert len(val_sources) == 2
+    assert len(test_sources) == 2
+    assert train_sources.isdisjoint(val_sources)
+    assert train_sources.isdisjoint(test_sources)
+    assert val_sources.isdisjoint(test_sources)
+
+    representatives = select_unique_source_indices(sequences, val_indices)
+    assert len(representatives) == 2
+    assert len({sequences[index].path for index in representatives}) == 2
+
+
+def test_split_sequence_indices_requires_independent_source_videos():
+    sequences = [_sequence("same.mp4"), _sequence("same.mp4", start_frame=64)]
+    with pytest.raises(ValueError, match="source videos"):
+        split_sequence_indices(sequences, val_fraction=0.25, test_fraction=0.25, seed=42)
+
+
+def test_split_sequence_indices_persists_and_validates_manifest(tmp_path: Path):
+    sequences = [_sequence(f"{name}.mp4") for name in "abcdef"]
+    manifest = tmp_path / "split.json"
+    first = split_sequence_indices(
+        sequences,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        seed=42,
+        manifest_path=manifest,
+    )
+    second = split_sequence_indices(
+        sequences,
+        val_fraction=0.25,
+        test_fraction=0.25,
+        seed=42,
+        manifest_path=manifest,
+    )
+    assert manifest.is_file()
+    assert first == second
+
+    with pytest.raises(ValueError, match="differ from the fixed split manifest"):
+        split_sequence_indices(
+            [*sequences, _sequence("new.mp4")],
+            val_fraction=0.25,
+            test_fraction=0.25,
+            seed=42,
+            manifest_path=manifest,
+        )
 
 
 def test_crop_box_centers_16_9_when_not_training():

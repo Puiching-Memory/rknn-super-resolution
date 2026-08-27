@@ -170,6 +170,14 @@ class PhaseRLFNSR(nn.Module):
         self.scale = scale
         self.phase_factor = phase_factor
         self.core_scale = scale * phase_factor
+        self._num_channels = num_channels
+        self._num_blocks = num_blocks
+        self._codec_feature_channels = codec_feature_channels
+        self._codec_project_channels = codec_project_channels
+        self._codec_upsample_factor = codec_upsample_factor
+        self._negative_slope = negative_slope
+        self._core_in_channels = in_channels * phase_factor * phase_factor
+        self._core_out_channels = out_channels * self.core_scale * self.core_scale
         self.input_unshuffle = nn.PixelUnshuffle(phase_factor)
         self.core = PhaseRLFNCore(
             in_channels=in_channels,
@@ -188,41 +196,43 @@ class PhaseRLFNSR(nn.Module):
 
     @property
     def num_channels(self) -> int:
-        return self.core.num_channels
+        return self._num_channels
 
     @property
     def num_blocks(self) -> int:
-        return self.core.num_blocks
+        return self._num_blocks
 
     @property
     def codec_feature_channels(self) -> int:
-        return self.core.codec_feature_channels
+        return self._codec_feature_channels
 
     @property
     def codec_project_channels(self) -> int:
-        return self.core.codec_project_channels
+        return self._codec_project_channels
 
     @property
     def codec_upsample_factor(self) -> int:
-        return self.core.codec_upsample_factor
+        return self._codec_upsample_factor
 
     @property
     def negative_slope(self) -> float:
-        return self.core.negative_slope
+        return self._negative_slope
 
     @property
     def core_in_channels(self) -> int:
-        return self.core.core_in_channels
+        return self._core_in_channels
 
     @property
     def core_out_channels(self) -> int:
-        return self.core.core_out_channels
+        return self._core_out_channels
 
     def forward_core(
         self,
         phases: torch.Tensor,
         codec_feature: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if codec_feature is None:
+            return self.core(phases)
         return self.core(phases, codec_feature)
 
     def bicubic_base(self, x: torch.Tensor) -> torch.Tensor:

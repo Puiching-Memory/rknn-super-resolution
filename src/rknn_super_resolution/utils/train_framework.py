@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import socket
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -21,6 +20,7 @@ from torch.utils.data import DataLoader
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.data.mlvc_loader import MLVCTrainLoader, build_mlvc_loaders
 from rknn_super_resolution.models import PhaseRLFNSR
+from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT
 from rknn_super_resolution.utils.traceml_profiling import add_traceml_args
 
 
@@ -53,6 +53,12 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--mlvc_variant", type=str, choices=["small", "full"], default=None)
     parser.add_argument("--sequence_frames", type=int, default=None)
     parser.add_argument("--q_indices", nargs="+", type=int, default=None)
+    parser.add_argument(
+        "--split_manifest",
+        type=str,
+        default=None,
+        help="fixed OpenVidHD split manifest; pass an empty value to disable persistence",
+    )
     parser.add_argument("--num_workers", type=int, default=None)
     parser.add_argument("--scale", type=int, default=None)
     parser.add_argument("--num_channels", type=int, default=None)
@@ -84,12 +90,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="background batches to prefetch ahead of the training step",
     )
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument(
-        "--sync_bn",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="use SyncBatchNorm across DDP ranks (usually unnecessary with large per-GPU batch)",
-    )
     parser.add_argument("--swanlab_project", type=str, default="rknn-super-resolution")
     parser.add_argument(
         "--swanlab_experiment",
@@ -218,18 +218,6 @@ def run_backward(
         optimizer.step()
 
 
-def maybe_sync_batchnorm(model: nn.Module, args: argparse.Namespace) -> nn.Module:
-    if getattr(args, "sync_bn", False):
-        return nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    return model
-
-
-def maybe_compile(model: nn.Module, args: argparse.Namespace) -> nn.Module:
-    if not getattr(args, "compile", True):
-        return model
-    return torch.compile(model)
-
-
 def require_cuda() -> None:
     """Ensure a CUDA-capable PyTorch build and visible GPU are available."""
     if not torch.cuda.is_available():
@@ -273,7 +261,6 @@ def build_model(
     device: torch.device,
     *,
     weight_path: str | None = None,
-    strict_load: bool = True,
 ) -> PhaseRLFNSR:
     """Build PhaseRLFNSR and optionally load its native checkpoint."""
     resolve_model_args(args)
@@ -289,13 +276,9 @@ def build_model(
     ).to(device)
     if weight_path is not None:
         raw = torch.load(weight_path, map_location=device, weights_only=False)
-        if isinstance(raw, dict) and "state_dict" in raw:
-            state_dict = raw["state_dict"]
-        elif isinstance(raw, dict):
-            state_dict = raw
-        else:
-            raise TypeError(f"Unsupported checkpoint format in {weight_path}")
-        model.load_state_dict(state_dict, strict=strict_load)
+        if not isinstance(raw, dict) or raw.get("graph_format") != FLOAT_GRAPH_FORMAT:
+            raise TypeError(f"Expected a {FLOAT_GRAPH_FORMAT} checkpoint in {weight_path}")
+        model.load_state_dict(raw["state_dict"], strict=True)
     return model
 
 
@@ -308,7 +291,7 @@ def build_loaders(
     distributed: bool = False,
     rank: int | None = None,
     world_size: int | None = None,
-) -> tuple[MLVCTrainLoader, None, DataLoader | object]:
+) -> tuple[MLVCTrainLoader, DataLoader | object]:
     """Build OpenVidHD loaders with TorchCodec GPU decode and a frozen MLVC runtime."""
     if distributed and dist.is_initialized():
         rank = dist.get_rank() if rank is None else rank
@@ -326,6 +309,7 @@ def build_loaders(
         "mlvc_variant": getattr(args, "mlvc_variant", None),
         "sequence_frames": getattr(args, "sequence_frames", None),
         "q_indices": tuple(args.q_indices) if getattr(args, "q_indices", None) else None,
+        "split_manifest": getattr(args, "split_manifest", None),
         "num_workers": getattr(args, "num_workers", None),
         "codec_context": getattr(args, "codec_context", None),
         "codec_dropout": getattr(args, "codec_dropout", None),
@@ -343,15 +327,7 @@ def build_loaders(
         world_size=world_size,
         project_root=Path(__file__).resolve().parents[3],
     )
-    return train_bundle, None, val_loader
-
-
-def find_free_port() -> int:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("localhost", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-    return port
+    return train_bundle, val_loader
 
 
 def save_checkpoint_dict(

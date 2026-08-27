@@ -20,7 +20,6 @@ def rgb_to_yuv444(bchw: torch.Tensor) -> torch.Tensor:
 
 
 def yuv444_to_rgb(tensor: torch.Tensor) -> torch.Tensor:
-    """Convert BCHW or CHW YUV444 in [0, 255] to RGB in [0, 255]."""
     """Convert CHW/BCHW BT.709 YCbCr in [0, 255] to RGB in [0, 255]."""
     y, cb, cr = tensor.chunk(3, dim=-3)
     r = y + (2.0 - 2.0 * _KR) * (cr - _CENTER)

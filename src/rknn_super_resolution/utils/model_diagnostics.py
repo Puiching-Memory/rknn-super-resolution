@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
@@ -192,13 +191,3 @@ def check_deploy_consistency(
         "deploy/mean_abs_diff": sum(mean_abs) / len(mean_abs),
         "deploy/psnr_train_vs_deploy": sum(match_psnr) / len(match_psnr),
     }
-
-
-@contextmanager
-def forward_diagnostics(model: nn.Module):
-    """Context manager that installs forward hooks for one training run."""
-    tracker = ForwardDiagnosticsTracker(model)
-    try:
-        yield tracker
-    finally:
-        tracker.close()

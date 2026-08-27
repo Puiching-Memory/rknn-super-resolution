@@ -30,9 +30,14 @@ from rknn_super_resolution.data.openvid import (
     OpenVidSequenceDataset,
     collate_openvid_batch,
     load_openvid_index,
+    select_unique_source_indices,
     split_sequence_indices,
 )
-from rknn_super_resolution.models.qat_utils import prepare_model_for_qat
+from rknn_super_resolution.models.graph_format import PT2E_QAT_FORMAT
+from rknn_super_resolution.models.qat_utils import (
+    disable_qat_observers,
+    prepare_model_for_qat,
+)
 from rknn_super_resolution.utils.sr_metrics import iter_val_batches
 from rknn_super_resolution.utils.swanlab_logging import (
     collect_sr_validation_panels,
@@ -136,7 +141,7 @@ def _namespace(config: str | None) -> argparse.Namespace:
 
 
 def _load_qat_stable_model(args: argparse.Namespace, checkpoint: Path, device: torch.device):
-    """Rebuild the QAT-stable inference graph (fake quant on, observers off)."""
+    """Rebuild the PT2E QAT inference graph (fake quant on, observers off)."""
     cfg = load_config(getattr(args, "config", None))
     model = build_model(args, device)
     lr_h, lr_w = (int(v) for v in cfg.data.lr_size)
@@ -161,14 +166,14 @@ def _load_qat_stable_model(args: argparse.Namespace, checkpoint: Path, device: t
         )
     model = prepare_model_for_qat(
         model,
-        backend=cfg.training.backend,
         example_inputs=example_inputs,
     )
     raw = torch.load(checkpoint, map_location=device, weights_only=False)
-    state = raw["state_dict"] if isinstance(raw, dict) and "state_dict" in raw else raw
-    load_training_module_state_dict(model, state)
+    if not isinstance(raw, dict) or raw.get("graph_format") != PT2E_QAT_FORMAT:
+        raise TypeError(f"expected a {PT2E_QAT_FORMAT} checkpoint: {checkpoint}")
+    load_training_module_state_dict(model, raw["state_dict"])
     model.eval()
-    model.apply(torch.ao.quantization.disable_observer)
+    disable_qat_observers(model)
     return model
 
 
@@ -194,9 +199,15 @@ def _build_preview_loader(
     description = (ROOT / data.dataset_description).resolve()
     video_root = (ROOT / data.video_root).resolve()
     sequences = load_openvid_index(description, video_root=video_root)
-    _train, val_indices = split_sequence_indices(
-        len(sequences), val_fraction=data.val_fraction, seed=data.split_seed
+    manifest = (ROOT / data.split_manifest).resolve() if data.split_manifest else None
+    _train, val_indices, _test = split_sequence_indices(
+        sequences,
+        val_fraction=data.val_fraction,
+        test_fraction=data.test_fraction,
+        seed=data.split_seed,
+        manifest_path=manifest,
     )
+    val_indices = select_unique_source_indices(sequences, val_indices)
     dataset = OpenVidSequenceDataset(
         sequences,
         indices=val_indices,
@@ -217,7 +228,7 @@ def _build_preview_loader(
         shuffle=False,
         num_workers=data.num_workers,
         pin_memory=True,
-        persistent_workers=data.num_workers > 0,
+        persistent_workers=False,
         collate_fn=collate_openvid_batch,
     )
     runtime = FrozenMLVCRuntime(

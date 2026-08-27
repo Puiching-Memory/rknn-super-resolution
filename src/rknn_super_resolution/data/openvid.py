@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import csv
+import json
+import math
+import os
 import random
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -116,20 +120,149 @@ def load_openvid_index(
 
 
 def split_sequence_indices(
-    count: int,
+    sequences: Sequence[OpenVidSequence],
     *,
     val_fraction: float,
+    test_fraction: float,
     seed: int,
-) -> tuple[list[int], list[int]]:
-    """Create a stable source-level train/validation split."""
-    if count < 2:
-        raise ValueError("OpenVidHD training requires at least two independent sequences")
-    if not 0.0 < val_fraction < 1.0:
-        raise ValueError("val_fraction must be between 0 and 1")
-    indices = list(range(count))
-    random.Random(seed).shuffle(indices)
-    val_count = min(count - 1, max(1, round(count * val_fraction)))
-    return sorted(indices[val_count:]), sorted(indices[:val_count])
+    manifest_path: str | Path | None = None,
+) -> tuple[list[int], list[int], list[int]]:
+    """Create or load a stable source-level train/validation/test split."""
+    if val_fraction <= 0.0 or test_fraction <= 0.0:
+        raise ValueError("val_fraction and test_fraction must be positive")
+    if val_fraction + test_fraction >= 1.0:
+        raise ValueError("val_fraction + test_fraction must be less than 1")
+
+    indices_by_source: dict[str, list[int]] = {}
+    paths_by_source: dict[str, str] = {}
+    for index, sequence in enumerate(sequences):
+        source = Path(sequence.path).name
+        existing_path = paths_by_source.setdefault(source, sequence.path)
+        if existing_path != sequence.path:
+            raise ValueError(f"source filename is not unique: {source}")
+        indices_by_source.setdefault(source, []).append(index)
+
+    sources = list(indices_by_source)
+    if len(sources) < 3:
+        raise ValueError("OpenVidHD training requires at least three independent source videos")
+
+    split_sources: dict[str, list[str]]
+    manifest = Path(manifest_path) if manifest_path is not None else None
+    if manifest is not None and manifest.is_file():
+        split_sources = _load_split_manifest(
+            manifest,
+            sources=sources,
+            val_fraction=val_fraction,
+            test_fraction=test_fraction,
+            seed=seed,
+        )
+    else:
+        random.Random(seed).shuffle(sources)
+        val_count = max(1, math.ceil(len(sources) * val_fraction))
+        test_count = max(1, math.ceil(len(sources) * test_fraction))
+        if val_count + test_count >= len(sources):
+            raise ValueError("split fractions leave no source videos for training")
+        split_sources = {
+            "validation": sources[:val_count],
+            "test": sources[val_count : val_count + test_count],
+            "train": sources[val_count + test_count :],
+        }
+        if manifest is not None:
+            _write_split_manifest(
+                manifest,
+                split_sources=split_sources,
+                val_fraction=val_fraction,
+                test_fraction=test_fraction,
+                seed=seed,
+            )
+
+    train_sources = split_sources["train"]
+    val_sources = split_sources["validation"]
+    test_sources = split_sources["test"]
+    train_indices = [index for source in train_sources for index in indices_by_source[source]]
+    val_indices = [index for source in val_sources for index in indices_by_source[source]]
+    test_indices = [index for source in test_sources for index in indices_by_source[source]]
+    return train_indices, val_indices, test_indices
+
+
+def _load_split_manifest(
+    path: Path,
+    *,
+    sources: Sequence[str],
+    val_fraction: float,
+    test_fraction: float,
+    seed: int,
+) -> dict[str, list[str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload["version"] != 1:
+            raise ValueError(f"unsupported version {payload['version']}")
+        if payload["seed"] != seed:
+            raise ValueError("split_seed does not match")
+        if payload["val_fraction"] != val_fraction:
+            raise ValueError("val_fraction does not match")
+        if payload["test_fraction"] != test_fraction:
+            raise ValueError("test_fraction does not match")
+        raw_splits = payload["splits"]
+        split_sources = {name: list(raw_splits[name]) for name in ("train", "validation", "test")}
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid OpenVidHD split manifest: {path}") from exc
+
+    if any(not isinstance(source, str) for split in split_sources.values() for source in split):
+        raise ValueError(f"invalid OpenVidHD split manifest: {path}")
+    if any(len(split) != len(set(split)) for split in split_sources.values()):
+        raise ValueError(f"OpenVidHD split manifest contains duplicate source videos: {path}")
+    source_sets = [set(split_sources[name]) for name in ("train", "validation", "test")]
+    if any(not source_set for source_set in source_sets):
+        raise ValueError(f"OpenVidHD split manifest contains an empty split: {path}")
+    if any(source_sets[left] & source_sets[right] for left, right in ((0, 1), (0, 2), (1, 2))):
+        raise ValueError(f"OpenVidHD split manifest contains overlapping source videos: {path}")
+    manifest_sources = set().union(*source_sets)
+    current_sources = set(sources)
+    if manifest_sources != current_sources:
+        missing = len(manifest_sources - current_sources)
+        added = len(current_sources - manifest_sources)
+        raise ValueError(
+            "OpenVidHD sources differ from the fixed split manifest "
+            f"(missing={missing}, added={added}): {path}"
+        )
+    return split_sources
+
+
+def _write_split_manifest(
+    path: Path,
+    *,
+    split_sources: dict[str, list[str]],
+    val_fraction: float,
+    test_fraction: float,
+    seed: int,
+) -> None:
+    payload = {
+        "version": 1,
+        "seed": seed,
+        "val_fraction": val_fraction,
+        "test_fraction": test_fraction,
+        "splits": split_sources,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def select_unique_source_indices(
+    sequences: Sequence[OpenVidSequence],
+    indices: Sequence[int],
+) -> list[int]:
+    """Keep one representative sequence for each source video, preserving order."""
+    selected: list[int] = []
+    seen: set[str] = set()
+    for index in indices:
+        source = sequences[index].path
+        if source not in seen:
+            seen.add(source)
+            selected.append(index)
+    return selected
 
 
 def crop_box(width: int, height: int, *, training: bool) -> tuple[int, int, int, int]:

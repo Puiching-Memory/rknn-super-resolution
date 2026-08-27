@@ -32,13 +32,11 @@ def test_validation_metrics_to_log_dict():
         psnr_p10=29.0,
         psnr_p50=30.0,
         psnr_p90=31.0,
-        dists=0.12,
         vmaf=72.5,
     )
     logged = metrics.to_log_dict()
     assert logged["val/psnr"] == 30.0
     assert logged["val/vmaf"] == 72.5
-    assert logged["val/dists"] == 0.12
 
 
 def test_y_psnr_runs_on_batch():
@@ -96,7 +94,6 @@ def test_validate_ddp_extended_yuv_uses_luma_and_skips_vmaf():
         rank=0,
         world_size=1,
         scale=3,
-        compute_dists=False,
         compute_vmaf=False,
         colorspace="yuv",
     )

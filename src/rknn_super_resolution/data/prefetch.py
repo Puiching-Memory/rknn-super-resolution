@@ -5,7 +5,6 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
-from contextlib import suppress
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -26,13 +25,22 @@ class BatchPrefetcher(Iterator[T]):
     def _worker(self) -> None:
         try:
             for batch in self._loader:
-                if self._stop.is_set():
+                if not self._put(batch):
                     break
-                self._queue.put(batch)
         except BaseException as exc:
-            self._queue.put(exc)
+            self._put(exc)
         finally:
-            self._queue.put(None)
+            self._put(None)
+
+    def _put(self, item: T | BaseException | None) -> bool:
+        """Put an item unless shutdown was requested while the queue was full."""
+        while not self._stop.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+            except queue.Full:
+                continue
+            return True
+        return False
 
     def __iter__(self) -> BatchPrefetcher[T]:
         return self
@@ -52,8 +60,5 @@ class BatchPrefetcher(Iterator[T]):
                 self._queue.get_nowait()
             except queue.Empty:
                 break
-        # Unblock a worker stuck on put() so it can observe _stop / exit.
-        with suppress(queue.Full):
-            self._queue.put_nowait(None)
         if self._thread.is_alive():
-            self._thread.join(timeout=30.0)
+            self._thread.join(timeout=1.0)

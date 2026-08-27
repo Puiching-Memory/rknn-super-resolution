@@ -17,6 +17,10 @@ def test_default_config_deploy_contract():
     assert cfg.data.colorspace == "yuv"
     assert cfg.data.mlvc_variant == "small"
     assert cfg.data.q_indices == (0, 21, 42, 63)
+    assert cfg.data.val_fraction == 0.05
+    assert cfg.data.test_fraction == 0.05
+    assert cfg.data.val_samples == 32
+    assert cfg.data.split_manifest == "data/OpenVidHD/openvidhd_split_v1.json"
     assert cfg.data.lr_size == (360, 640)
     assert cfg.data.hr_size == (1080, 1920)
     assert cfg.data.codec_context is True

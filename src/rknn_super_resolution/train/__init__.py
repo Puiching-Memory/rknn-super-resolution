@@ -1,1 +1,1 @@
-"""Training entry points for stage 1/2/3."""
+"""Unified plateau-driven FP32-to-QAT training entry point."""

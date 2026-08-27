@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -54,7 +55,7 @@ def main() -> None:
     }
     data = replace(
         data,
-        val_samples=args.samples,
+        val_samples=max(1, math.ceil(args.samples / len(data.q_indices))),
         **{name: value for name, value in overrides.items() if value is not None},
     )
     train_loader, val_loader = build_mlvc_loaders(
@@ -100,6 +101,7 @@ def main() -> None:
             if len(paths) >= args.samples:
                 break
     finally:
+        val_loader.close()
         train_loader.close()
 
     lines = [f"{phase} {codec}\n" if codec is not None else f"{phase}\n" for phase, codec in paths]

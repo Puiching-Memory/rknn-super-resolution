@@ -33,9 +33,11 @@ class DataConfig:
     mlvc_variant: str = "small"
     sequence_frames: int = 8
     q_indices: tuple[int, ...] = (0, 21, 42, 63)
-    val_fraction: float = 0.01
-    val_samples: int = 16
+    val_fraction: float = 0.05
+    test_fraction: float = 0.05
+    val_samples: int = 32
     split_seed: int = 42
+    split_manifest: str | None = "data/OpenVidHD/openvidhd_split_v1.json"
     lr_size: tuple[int, int] = (360, 640)
     hr_size: tuple[int, int] = (1080, 1920)
     colorspace: str = "yuv"
@@ -71,7 +73,6 @@ class TrainingConfig:
     clip_min: float = -1.0
     clip_max: float = 1.0
     ema_decay: float = 0.999
-    backend: str = "qnnpack"
     val_metric: str = "vmaf"
 
 

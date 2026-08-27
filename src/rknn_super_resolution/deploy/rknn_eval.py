@@ -13,12 +13,12 @@ from rknn_super_resolution.config import ModelConfig
 
 try:
     import cv2
-except ImportError:  # pragma: no cover - optional in minimal envs
+except ImportError:  # pragma: no cover - the isolated RKNN env may omit eval dependencies
     cv2 = None  # type: ignore[assignment]
 
 try:
     from skimage.metrics import structural_similarity as skimage_ssim
-except ImportError:  # pragma: no cover
+except ImportError:  # pragma: no cover - the isolated RKNN env may omit scikit-image
     skimage_ssim = None
 
 
@@ -94,7 +94,7 @@ def ssim_numpy(pred: np.ndarray, target: np.ndarray) -> float:
             )
         )
 
-    # Fallback: luminance-only SSIM (no skimage).
+    # The RKNN-only environment uses a dependency-free luminance approximation.
     def _to_y(img: np.ndarray) -> np.ndarray:
         r, g, b = img[..., 0], img[..., 1], img[..., 2]
         return 0.299 * r + 0.587 * g + 0.114 * b
@@ -294,6 +294,7 @@ def load_fp32_predictor(
     import torch
 
     from rknn_super_resolution.models import PhaseRLFNSR
+    from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT
 
     dev = torch.device(device)
     model = PhaseRLFNSR(
@@ -306,13 +307,9 @@ def load_fp32_predictor(
         codec_upsample_factor=codec_upsample_factor,
     ).to(dev)
     raw = torch.load(weight, map_location=dev, weights_only=False)
-    if isinstance(raw, dict) and "state_dict" in raw:
-        state_dict = raw["state_dict"]
-    elif isinstance(raw, dict):
-        state_dict = raw
-    else:
-        raise TypeError(f"Unsupported checkpoint format in {weight}")
-    model.load_state_dict(state_dict)
+    if not isinstance(raw, dict) or raw.get("graph_format") != FLOAT_GRAPH_FORMAT:
+        raise TypeError(f"Expected a {FLOAT_GRAPH_FORMAT} checkpoint in {weight}")
+    model.load_state_dict(raw["state_dict"], strict=True)
     model.switch_to_deploy()
     model.eval()
 

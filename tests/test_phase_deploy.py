@@ -3,12 +3,17 @@
 from argparse import Namespace
 
 import numpy as np
-import pytest
 import torch
 
 from rknn_super_resolution.config import load_config
 from rknn_super_resolution.deploy.onnx import _CodecCore, _SRCore
-from rknn_super_resolution.deploy.rknn import _config_kwargs, _default_input_size, parse_args
+from rknn_super_resolution.deploy.rknn import (
+    _config_kwargs,
+    _default_input_size,
+    _load_smoke_inputs,
+    _onnx_has_qdq,
+    parse_args,
+)
 from rknn_super_resolution.deploy.rknn_eval import (
     pixel_shuffle_nchw_to_hwc,
     pixel_unshuffle_hwc_to_nchw,
@@ -46,17 +51,13 @@ def test_phase_defaults() -> None:
 
 
 def test_rknn_cli_accepts_tested_and_unlisted_boards() -> None:
-    assert parse_args(["--onnx", "model.onnx", "--target", "rk3576"]).target == "rk3576"
+    default = parse_args(["--onnx", "model.onnx", "--target", "rk3576"])
+    assert default.target == "rk3576"
+    assert default.quantization is True
     assert parse_args(["--onnx", "model.onnx", "--target", "RK3588"]).target == "rk3588"
     assert parse_args(["--onnx", "model.onnx", "--target", "RV1126B"]).target == "rv1126b"
     assert parse_args(["--onnx", "model.onnx", "--target", "RK9999"]).target == "rk9999"
-
-
-def test_rknn_cli_rejects_removed_eval_directory_aliases() -> None:
-    with pytest.raises(SystemExit):
-        parse_args(["--onnx", "model.onnx", "--eval_hr_dir", "hr"])
-    with pytest.raises(SystemExit):
-        parse_args(["--onnx", "model.onnx", "--eval_lr_dir", "lr"])
+    assert parse_args(["--onnx", "model.onnx", "--no-quantization"]).quantization is False
 
 
 def test_onnx_wrappers_match_core_contracts() -> None:
@@ -66,3 +67,42 @@ def test_onnx_wrappers_match_core_contracts() -> None:
     with torch.no_grad():
         assert torch.equal(_SRCore(model)(phases), model.forward_core(phases))
         assert torch.equal(_CodecCore(model)(phases, codec), model.forward_core(phases, codec))
+
+
+def test_rknn_detects_prequantized_qdq_onnx(tmp_path) -> None:
+    import onnx
+    from onnx import TensorProto, helper
+
+    graph = helper.make_graph(
+        [
+            helper.make_node("QuantizeLinear", ["x", "scale", "zero"], ["q"]),
+            helper.make_node("DequantizeLinear", ["q", "scale", "zero"], ["y"]),
+        ],
+        "qdq",
+        [helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])],
+        [helper.make_tensor_value_info("y", TensorProto.FLOAT, [1])],
+        initializer=[
+            helper.make_tensor("scale", TensorProto.FLOAT, [], [0.1]),
+            helper.make_tensor("zero", TensorProto.UINT8, [], [0]),
+        ],
+    )
+    path = tmp_path / "qdq.onnx"
+    onnx.save(helper.make_model(graph), path)
+
+    assert _onnx_has_qdq(path) is True
+
+
+def test_load_rknn_smoke_inputs_validates_two_input_contract(tmp_path) -> None:
+    phases = np.zeros((1, 12, 8, 10), dtype=np.uint8)
+    codec = np.zeros((1, 96, 2, 3), dtype=np.float32)
+    phase_path = tmp_path / "phases.npy"
+    codec_path = tmp_path / "codec.npy"
+    np.save(phase_path, phases)
+    np.save(codec_path, codec)
+    dataset = tmp_path / "calibration.txt"
+    dataset.write_text(f"{phase_path} {codec_path}\n", encoding="utf-8")
+
+    loaded = _load_smoke_inputs(dataset, [(12, 8, 10), (96, 2, 3)])
+
+    assert np.array_equal(loaded[0], phases)
+    assert np.array_equal(loaded[1], codec)

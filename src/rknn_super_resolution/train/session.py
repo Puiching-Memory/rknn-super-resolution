@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
+from rknn_super_resolution.config import load_config
 from rknn_super_resolution.distributed.context import DistributedContext
+from rknn_super_resolution.distributed.sync import rank0_section
 from rknn_super_resolution.distributed.validation import EarlyStopState, ValidationConfig
 from rknn_super_resolution.train.loop import StepTrainer
 from rknn_super_resolution.train.types import LoaderBundle, TrainConfig, TrainHooks
@@ -77,7 +80,7 @@ class TrainSession:
         train_aug: bool = True,
         val_bs: int = 1,
     ) -> LoaderBundle:
-        train_loader, _, val_loader = build_loaders(
+        train_loader, val_loader = build_loaders(
             self.args,
             self.ctx.device,
             train_aug=train_aug,
@@ -86,6 +89,19 @@ class TrainSession:
             rank=self.ctx.rank,
             world_size=self.ctx.world_size,
         )
+        data = load_config(getattr(self.args, "config", None)).data
+        split_manifest = getattr(self.args, "split_manifest", data.split_manifest)
+        if split_manifest:
+            manifest = Path(split_manifest)
+            if not manifest.is_absolute():
+                manifest = Path(__file__).resolve().parents[3] / manifest
+
+            def _archive_manifest() -> None:
+                if not manifest.is_file():
+                    raise FileNotFoundError(f"OpenVidHD split manifest was not created: {manifest}")
+                shutil.copy2(manifest, self.save_dir / "dataset_split.json")
+
+            rank0_section(self.ctx, _archive_manifest)
         return LoaderBundle(train=train_loader, val=val_loader)
 
     def run_trainer(

@@ -28,7 +28,6 @@ class ValidationMetrics:
     psnr_p10: float
     psnr_p50: float
     psnr_p90: float
-    dists: float | None = None
     vmaf: float | None = None
 
     def to_log_dict(self) -> dict[str, float]:
@@ -42,8 +41,6 @@ class ValidationMetrics:
             "val/psnr_p50": self.psnr_p50,
             "val/psnr_p90": self.psnr_p90,
         }
-        if self.dists is not None:
-            metrics["val/dists"] = self.dists
         if self.vmaf is not None:
             metrics["val/vmaf"] = self.vmaf
         return metrics
@@ -144,9 +141,8 @@ def _rank_sample_indices(val_loader: DataLoader | object) -> list[int]:
 
 
 def _aggregate_per_sample(
-    records: list[tuple[int, float, float, float, float, float, float]],
+    records: list[tuple[int, float, float, float, float, float]],
     *,
-    has_dists: bool,
     has_vmaf: bool,
 ) -> ValidationMetrics:
     if not records:
@@ -157,8 +153,7 @@ def _aggregate_per_sample(
     y_psnrs = np.array([row[2] for row in records], dtype=np.float64)
     ssims = np.array([row[3] for row in records], dtype=np.float64)
     l1s = np.array([row[4] for row in records], dtype=np.float64)
-    dists_vals = np.array([row[5] for row in records], dtype=np.float64) if has_dists else None
-    vmaf_vals = np.array([row[6] for row in records], dtype=np.float64) if has_vmaf else None
+    vmaf_vals = np.array([row[5] for row in records], dtype=np.float64) if has_vmaf else None
 
     return ValidationMetrics(
         psnr=float(psnrs.mean()),
@@ -169,7 +164,6 @@ def _aggregate_per_sample(
         psnr_p10=float(np.percentile(psnrs, 10)),
         psnr_p50=float(np.percentile(psnrs, 50)),
         psnr_p90=float(np.percentile(psnrs, 90)),
-        dists=float(dists_vals.mean()) if dists_vals is not None else None,
         vmaf=float(vmaf_vals.mean()) if vmaf_vals is not None else None,
     )
 
@@ -190,14 +184,12 @@ def validate_ddp_extended(
     world_size: int,
     *,
     scale: int = 3,
-    compute_dists: bool = False,
     compute_vmaf: bool = True,
     vmaf_model: str = "1080p",
     vmaf_enc_size: tuple[int, int] | None = (360, 640),
     colorspace: str = "yuv",
 ) -> tuple[float, ValidationMetrics | None]:
     """Run full validation; primary score is VMAF when enabled, else PSNR."""
-    from rknn_super_resolution.utils.pyiqa_metric import batch_perceptual_metric
     from rknn_super_resolution.utils.vmaf_metric import batch_vmaf
 
     if colorspace == "yuv":
@@ -210,7 +202,7 @@ def validate_ddp_extended(
     device = _module_device(unwrap, rank)
     shave = scale
     sample_indices = _rank_sample_indices(val_loader)
-    local_records: list[tuple[int, float, float, float, float, float, float]] = []
+    local_records: list[tuple[int, float, float, float, float, float]] = []
     offset = 0
     enc_h, enc_w = vmaf_enc_size if vmaf_enc_size is not None else (None, None)
 
@@ -230,11 +222,6 @@ def validate_ddp_extended(
             psnr_b = batch_psnr(out_rgb, hr_rgb, shave=shave)
             y_psnr_b = batch_psnr(out[:, :1], hr[:, :1], shave=shave)
             l1_b = batch_l1(out, hr, shave=shave)
-            dists_b = (
-                batch_perceptual_metric(out_rgb, hr_rgb, device=device, shave=shave)
-                if compute_dists
-                else None
-            )
             vmaf_b = (
                 batch_vmaf(
                     out_rgb.cpu(),
@@ -252,11 +239,6 @@ def validate_ddp_extended(
             psnr_b = batch_psnr(out, hr, shave=shave)
             y_psnr_b = batch_y_psnr(out, hr, shave=shave)
             l1_b = batch_l1(out, hr, shave=shave)
-            dists_b = (
-                batch_perceptual_metric(out, hr, device=device, shave=shave)
-                if compute_dists
-                else None
-            )
             vmaf_b = (
                 batch_vmaf(
                     out_rgb.cpu(),
@@ -281,7 +263,6 @@ def validate_ddp_extended(
                 sr_np = out[i].detach().float().cpu().permute(1, 2, 0).numpy()
                 hr_np = hr[i].detach().float().cpu().permute(1, 2, 0).numpy()
             ssim_val = ssim_rgb(sr_np, hr_np, shave=shave)
-            dists_val = float(dists_b[i].item()) if dists_b is not None else 0.0
             vmaf_val = float(vmaf_b[i].item()) if vmaf_b is not None else 0.0
             local_records.append(
                 (
@@ -290,7 +271,6 @@ def validate_ddp_extended(
                     float(y_psnr_b[i].item()),
                     ssim_val,
                     float(l1_b[i].item()),
-                    dists_val,
                     vmaf_val,
                 )
             )
@@ -299,7 +279,7 @@ def validate_ddp_extended(
         model.train()
 
     if world_size > 1:
-        gathered: list[list[tuple[int, float, float, float, float, float, float]] | None] = [
+        gathered: list[list[tuple[int, float, float, float, float, float]] | None] = [
             None
         ] * world_size
         dist.all_gather_object(gathered, local_records)
@@ -309,38 +289,15 @@ def validate_ddp_extended(
     metrics: ValidationMetrics | None = None
     primary = 0.0
     if rank == 0:
-        merged: list[tuple[int, float, float, float, float, float, float]] = []
+        merged: list[tuple[int, float, float, float, float, float]] = []
         for part in gathered:
             if part:
                 merged.extend(part)
         metrics = _aggregate_per_sample(
             merged,
-            has_dists=compute_dists,
             has_vmaf=compute_vmaf,
         )
         primary = float(metrics.vmaf) if compute_vmaf and metrics.vmaf is not None else metrics.psnr
 
     primary = _broadcast_scalar(primary, rank, world_size, device)
     return primary, metrics
-
-
-@torch.no_grad()
-def validate_ddp(
-    model: nn.Module,
-    val_loader: DataLoader | object,
-    rank: int,
-    world_size: int,
-    *,
-    scale: int = 3,
-    colorspace: str = "yuv",
-) -> float:
-    """Evaluate mean primary val score (VMAF by default) on the validation set."""
-    score, _ = validate_ddp_extended(
-        model,
-        val_loader,
-        rank,
-        world_size,
-        scale=scale,
-        colorspace=colorspace,
-    )
-    return score

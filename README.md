@@ -30,6 +30,20 @@ PixelShuffle(6)，并在输出端叠加固定 bicubic 基线。MLVC 的 `ref_fea
   `96x46x80` codec feature，输出为 `108x180x320` 有符号残差。
 - 训练损失暂时保持 L1；所有阶段用同一 `vmaf`/`psnr` 验证协议选 best。
 
+## 历史模型 (Hugging Face)
+
+最佳 QAT checkpoint（`phase-rlfn-codec-v1`，step ~52,000）已发布到 Hugging Face：
+
+- 模型卡与权重：https://huggingface.co/Sail2Dream/phase-rlfn-codec-v1
+- 指标（MLVC 重建 YUV444 360×640 → 1080×1920，`vmaf` 协议选优）：
+
+|    VMAF |       PSNR |
+| ------: | ---------: |
+| 70.6694 | 34.9340 dB |
+
+该版本使用已经弃用的 FX QAT checkpoint 格式，仅保留作结果归档。当前代码使用
+TorchAO PT2E QAT，不加载这组旧权重。
+
 ## 环境
 
 项目只使用 `uv` 管理主环境，要求 Python 3.13，训练栈绑定 CUDA 13.2：
@@ -82,8 +96,8 @@ training:
 ./scripts/run_train.sh \
   --devices 6,7 \
   --nproc 2 \
-  --save-dir checkpoints/phase-rlfn-codec-v1 \
-  --experiment phase-rlfn-codec-v1
+  --save-dir checkpoints/phase-rlfn-codec-pt2e \
+  --experiment phase-rlfn-codec-pt2e
 ```
 
 训练是一条 step 时间线：
@@ -96,20 +110,41 @@ float -> qat_observe -> qat_stable -> complete
 patience，不会阻止小幅提升覆盖 best。恢复训练可设置：
 
 ```bash
-RESUME=checkpoints/phase-rlfn-codec-v1/last.pth ./scripts/run_train.sh --devices 6,7
+RESUME=checkpoints/phase-rlfn-codec-pt2e/last.pth ./scripts/run_train.sh --devices 6,7
+```
+
+在冻结的 test split 上只评估一次 checkpoint（直接调用时用单卡，也可通过
+`torchrun` 启动多卡评估）：
+
+```bash
+uv run rknn-super-resolution eval-mlvc-checkpoint \
+  --checkpoint checkpoints/phase-rlfn-codec-pt2e/best_ema.pth \
+  --split_manifest checkpoints/phase-rlfn-codec-pt2e/dataset_split.json \
+  --metric vmaf
 ```
 
 ## ONNX 与 RKNN
+
+首次转换先创建与训练栈隔离的 RKNN Toolkit2 环境：
+
+```bash
+scripts/setup_rknn_env.sh
+```
 
 导出 codec-aware 双输入 core：
 
 ```bash
 uv run rknn-super-resolution export-onnx \
-  --weight checkpoints/phase-rlfn-codec-v1/best_ema.pth \
-  --from-qat --static --output phase_rlfn_sr_x3.onnx
+  --weight checkpoints/phase-rlfn-codec-pt2e/best_ema.pth \
+  --output phase_rlfn_sr_x3.onnx
 ```
 
-传 `--no-codec-context` 可导出单输入 SR fallback core。生成双输入 PTQ 数据：
+PT2E QAT checkpoint 会提取其原生 QAT 权重并导出静态浮点 ONNX，再由 RKNN 使用
+真实 MLVC 校准输入执行 PTQ。RKNN Toolkit2 2.3.2 会把通用 PT2E Q/DQ 残差图的大量
+算子降为 FP16，因此转换入口会拒绝 Q/DQ ONNX，避免生成低效的伪 INT8 图。传
+`--no-codec-context` 可导出单输入 SR fallback core。
+
+从 float checkpoint 导出的 ONNX 使用同一条 RKNN PTQ 路径；双输入校准数据可这样生成：
 
 ```bash
 uv run rknn-super-resolution-build-rknn-calibration --samples 100
@@ -123,8 +158,12 @@ uv run rknn-super-resolution convert-rknn \
   --output phase_rlfn_sr_x3.rknn \
   --target rk3576 \
   --input_size '12,180,320;96,46,80' \
-  --calib_dir data/rknn_calib.txt
+  --calib_dir data/rknn_calib.txt \
+  --smoke_input data/rknn_calib.txt
 ```
+
+`--smoke_input` 会在导出前用清单首组双输入执行一次 RKNN PC 模拟器推理，并校验
+输出 shape、dtype 与有限值；它不替代连接目标板后的 NPU runtime 测试。
 
 `--target` 会传给 RKNN Toolkit 的 `target_platform`（默认值由配置中的
 `deploy.target` 决定），项目不对 Toolkit 支持的 target 设置白名单。已测试

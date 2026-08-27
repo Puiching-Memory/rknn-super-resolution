@@ -1,7 +1,7 @@
 """Tests for RKNN post-conversion accuracy helpers."""
 
+import cv2
 import numpy as np
-import pytest
 
 from rknn_super_resolution.deploy.rknn_eval import (
     AccuracyReport,
@@ -91,7 +91,6 @@ def test_mlvc_bt709_numpy_roundtrip():
 
 
 def test_collect_image_pairs_matches_same_stem(tmp_path):
-    cv2 = pytest.importorskip("cv2")
     hr_dir = tmp_path / "hr"
     lr_dir = tmp_path / "lr"
     hr_dir.mkdir()

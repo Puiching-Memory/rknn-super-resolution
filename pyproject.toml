@@ -6,24 +6,26 @@ readme = "README.md"
 requires-python = "==3.13.*"
 license = { text = "MIT" }
 dependencies = [
+    "numpy==2.5.2",
     "onnx==1.22.0",
     "onnxscript==0.7.1",
+    "opencv-python-headless==4.11.0.86",
     "loguru==0.7.3",
     "pillow==12.3.0",
     "pyyaml==6.0.3",
-    "rich==15.0.0",
     "scikit-image==0.26.0",
     "swanlab==0.9.1",
     "torch==2.13.0+cu132",
+    "torchao==0.18.0",
     "torchcodec==0.16.0+cu132",
-    "torchvision==0.28.0+cu132",
     "traceml-ai==0.3.6",
-    "typer==0.26.8",
-    "einops==0.8.2",
+]
+
+[dependency-groups]
+dev = [
     "pre-commit==4.6.0",
     "pytest==9.1.1",
     "ruff==0.15.21",
-    "pyiqa==0.1.16",
 ]
 
 # RKNN conversion stays in a separate environment because rknn-toolkit2's
@@ -33,11 +35,10 @@ dependencies = [
 rknn-super-resolution = "rknn_super_resolution.cli:main"
 rknn-super-resolution-train = "rknn_super_resolution.train.unified:main"
 rknn-super-resolution-export-onnx = "rknn_super_resolution.deploy.onnx:main"
-rknn-super-resolution-eval-psnr = "rknn_super_resolution.eval.psnr:evaluate_cli"
+rknn-super-resolution-eval-mlvc-checkpoint = "rknn_super_resolution.eval.mlvc_checkpoint:main"
 rknn-super-resolution-convert-rknn = "rknn_super_resolution.deploy.rknn:main"
 rknn-super-resolution-bench-rknn-activations = "rknn_super_resolution.deploy.act_fusion_bench:main"
 rknn-super-resolution-build-rknn-calibration = "rknn_super_resolution.dev.build_mlvc_calibration:main"
-rknn-super-resolution-generate-report-charts = "rknn_super_resolution.dev.generate_report_charts:main"
 rknn-super-resolution-sr-preview-report = "rknn_super_resolution.dev.sr_preview_report:main"
 
 [tool.uv]
@@ -46,7 +47,6 @@ add-bounds = "exact"
 [tool.uv.sources]
 torch = { index = "pytorch-cu132" }
 torchcodec = { index = "pytorch-cu132" }
-torchvision = { index = "pytorch-cu132" }
 
 [[tool.uv.index]]
 name = "pytorch-cu132"

@@ -17,7 +17,11 @@ from rknn_super_resolution.distributed import (
     wrap_training_model,
 )
 from rknn_super_resolution.distributed.validation import EarlyStopState, ValidationConfig
-from rknn_super_resolution.models.qat_utils import convert_qat_model, prepare_model_for_qat
+from rknn_super_resolution.models.graph_format import FLOAT_GRAPH_FORMAT, PT2E_QAT_FORMAT
+from rknn_super_resolution.models.qat_utils import (
+    disable_qat_observers,
+    prepare_model_for_qat,
+)
 from rknn_super_resolution.train.session import TrainSession
 from rknn_super_resolution.train.types import TrainConfig, TrainHooks
 from rknn_super_resolution.utils.run_logger import logger
@@ -74,7 +78,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip_min", type=float, default=None)
     parser.add_argument("--clip_max", type=float, default=None)
     parser.add_argument("--ema_decay", type=float, default=None)
-    parser.add_argument("--backend", type=str, default=None)
     parser.add_argument(
         "--resume",
         type=str,
@@ -123,7 +126,6 @@ def resolve_training_args(args: argparse.Namespace) -> argparse.Namespace:
         "clip_min",
         "clip_max",
         "ema_decay",
-        "backend",
         "val_metric",
     ):
         if getattr(args, name, None) is None:
@@ -140,6 +142,7 @@ def resolve_training_args(args: argparse.Namespace) -> argparse.Namespace:
         "mlvc_checkpoint",
         "mlvc_variant",
         "sequence_frames",
+        "split_manifest",
         "num_workers",
         "colorspace",
         "prefetch_batches",
@@ -234,6 +237,7 @@ def _checkpoint(
     lr_scheduler: optim.lr_scheduler.ReduceLROnPlateau | None = None,
 ) -> dict:
     checkpoint = {
+        "graph_format": PT2E_QAT_FORMAT if phase.startswith("qat") else FLOAT_GRAPH_FORMAT,
         "phase": phase,
         "step": step,
         "state_dict": training_module_state_dict(model),
@@ -261,9 +265,15 @@ def _checkpoint(
 
 def _load_raw(path: str | Path, device: torch.device) -> dict:
     raw = torch.load(path, map_location=device, weights_only=False)
-    required = {"phase", "step", "state_dict", "optimizer"}
+    required = {"graph_format", "phase", "step", "state_dict", "optimizer"}
     if not isinstance(raw, dict) or not required.issubset(raw):
         raise TypeError(f"Expected a unified training checkpoint in {path}")
+    phase = str(raw["phase"])
+    expected_format = PT2E_QAT_FORMAT if phase.startswith("qat") else FLOAT_GRAPH_FORMAT
+    if raw["graph_format"] != expected_format:
+        raise ValueError(
+            f"checkpoint graph_format {raw['graph_format']!r} does not match phase {phase!r}"
+        )
     return raw
 
 
@@ -296,9 +306,9 @@ def _restore(
 
 
 def _weight_clip(model: nn.Module, clip_min: float, clip_max: float) -> None:
-    for module in model.modules():
-        if isinstance(module, (nn.Conv2d, nn.Linear)):
-            module.weight.data.clamp_(clip_min, clip_max)
+    for name, parameter in model.named_parameters():
+        if name.endswith("weight") and parameter.ndim in (2, 4):
+            parameter.data.clamp_(clip_min, clip_max)
 
 
 def _update_ema(ema_model: nn.Module, model: nn.Module, decay: float) -> None:
@@ -316,7 +326,6 @@ def _train_config(args: argparse.Namespace, max_steps: int) -> TrainConfig:
         val_every=args.val_every,
         save_every=args.save_every,
         prefetch_batches=resolve_prefetch_batches(args),
-        val_scale=args.scale,
     )
 
 
@@ -436,7 +445,6 @@ def main() -> None:
                     model,
                     ctx,
                     compile_model=args.compile,
-                    sync_bn=args.sync_bn,
                 )
                 optimizer = optim.Adam(model.parameters(), lr=args.float_lr, betas=(0.9, 0.999))
                 train_accel = build_train_accel(args)
@@ -493,6 +501,7 @@ def main() -> None:
                         _stop_reason(float_early_stop),
                     )
                 _close_loader(loaders.train)
+                _close_loader(loaders.val)
                 del loaders, optimizer, model
                 ctx.barrier()
                 float_best = float_dir / "best.pth"
@@ -524,12 +533,16 @@ def main() -> None:
                         device=ctx.device,
                     ),
                 )
+            ema_base_model = copy.deepcopy(base_model)
             qat_model = prepare_model_for_qat(
                 base_model,
-                backend=args.backend,
                 example_inputs=example_inputs,
             ).to(ctx.device)
-            ema_model = copy.deepcopy(qat_model)
+            ema_model = prepare_model_for_qat(
+                ema_base_model,
+                example_inputs=example_inputs,
+            ).to(ctx.device)
+            ema_model.load_state_dict(qat_model.state_dict(), strict=True)
             ema_model.requires_grad_(False)
             model = wrap_training_model(qat_model, ctx, compile_model=False)
             train_model = unwrap_model(model)
@@ -617,8 +630,8 @@ def main() -> None:
                         _stop_reason(observe_early_stop),
                     )
 
-            train_model.apply(torch.quantization.disable_observer)
-            ema_model.apply(torch.quantization.disable_observer)
+            disable_qat_observers(train_model)
+            disable_qat_observers(ema_model)
             stable_stop = global_step + args.qat_safety_max_steps
             stable_early_stop = (
                 resume_early_stop
@@ -640,9 +653,14 @@ def main() -> None:
                 )
             )
 
-            def save_best_ema(best_path: Path) -> None:
+            def save_best_ema(best_path: Path, step: int) -> None:
                 torch.save(
-                    ema_model.state_dict(),
+                    {
+                        "graph_format": PT2E_QAT_FORMAT,
+                        "phase": QAT_STABLE,
+                        "step": step,
+                        "state_dict": ema_model.state_dict(),
+                    },
                     best_path.with_name("best_ema.pth"),
                 )
 
@@ -673,28 +691,18 @@ def main() -> None:
                 save_dir=session.save_dir,
             )
             _close_loader(loaders.train)
+            _close_loader(loaders.val)
 
             if ctx.is_main:
-                torch.save(ema_model.state_dict(), session.save_dir / "last_ema.pth")
-                try:
-                    best_qat = session.save_dir / "best.pth"
-                    if best_qat.is_file():
-                        best_raw = torch.load(
-                            best_qat,
-                            map_location=ctx.device,
-                            weights_only=False,
-                        )
-                        load_training_module_state_dict(
-                            train_model,
-                            best_raw["state_dict"],
-                        )
-                    quantized = convert_qat_model(train_model)
-                    torch.save(
-                        quantized.state_dict(),
-                        session.save_dir / "quantized_state_dict.pth",
-                    )
-                except Exception as exc:
-                    logger.warning("Post-training QAT conversion failed: {}", exc)
+                torch.save(
+                    {
+                        "graph_format": PT2E_QAT_FORMAT,
+                        "phase": QAT_STABLE,
+                        "step": global_step,
+                        "state_dict": ema_model.state_dict(),
+                    },
+                    session.save_dir / "last_ema.pth",
+                )
                 logger.info(
                     "Training completed at step {} ({}).",
                     global_step,
