@@ -123,6 +123,31 @@ uv run rknn-super-resolution eval-mlvc-checkpoint \
   --metric vmaf
 ```
 
+## 模型观测
+
+小模型可以直接做逐层结构分析，不必只看训练 loss。观测工具会输出 JSON 统计和
+五张 PNG：权重概览、硬裁剪敏感度、奇异值谱、通道能量以及卷积核频率响应：
+
+```bash
+uv run rknn-super-resolution model-observatory \
+  --checkpoint checkpoints/phase-rlfn-codec-pt2e/float/best.pth \
+  --clip_abs 1
+```
+
+若前向探针已把命名激活或时序状态保存为 NPZ，可同时分析分布、空间响应和相邻帧
+状态更新；两个 NPZ 中同名且同 shape 的数组会自动配对：
+
+```bash
+uv run rknn-super-resolution model-observatory \
+  --checkpoint checkpoints/run/float/best.pth \
+  --tensor_npz current_tensors.npz \
+  --previous_npz previous_tensors.npz
+```
+
+代码内可用 `ForwardHookObservatory` 对一次诊断前向的带参数叶模块自动采样；它会
+立即压缩为直方图、通道 RMS 和小尺寸空间图，不长期保留完整激活。渲染结果可通过
+`log_observation_panels` 写入当前 rank 0 的 SwanLab run。
+
 ## ONNX 与 RKNN
 
 首次转换先创建与训练栈隔离的 RKNN Toolkit2 环境：

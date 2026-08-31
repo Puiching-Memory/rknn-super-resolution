@@ -252,6 +252,7 @@ def setup_swanlab(
     resume_training: bool = False,
     run_id: str | None = None,
     resume: Literal["must", "allow", "never"] | bool = "must",
+    mode: Literal["online", "offline", "local", "disabled"] | None = None,
 ) -> None:
     """Initialize SwanLab on rank 0."""
     global _active, _run_id
@@ -266,6 +267,8 @@ def setup_swanlab(
         "config": config or {},
         "log_dir": str(save_dir / "swanlog"),
     }
+    if mode is not None:
+        init_kwargs["mode"] = mode
     resolved_run_id = _normalize_cloud_run_id(
         run_id,
         project=project,
@@ -330,6 +333,23 @@ def log_metrics(metrics: dict[str, Any], *, step: int | None = None) -> None:
             swanlab.log(metrics)
     except Exception as exc:
         logger.warning("swanlab log failed (step={}): {}", step, exc)
+
+
+def log_observation_panels(
+    panels: dict[str, np.ndarray],
+    *,
+    step: int,
+    key_prefix: str = "model_observatory",
+    max_size: int = 1600,
+) -> None:
+    """Log already-rendered model observation panels on the active rank-0 run."""
+    if not _active or not panels:
+        return
+    payload = {
+        f"{key_prefix}/{name}": swanlab.Image(panel, size=max_size)
+        for name, panel in panels.items()
+    }
+    log_metrics(payload, step=step)
 
 
 def finish_swanlab() -> None:

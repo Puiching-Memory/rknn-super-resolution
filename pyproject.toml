@@ -40,6 +40,12 @@ rknn-super-resolution-convert-rknn = "rknn_super_resolution.deploy.rknn:main"
 rknn-super-resolution-bench-rknn-activations = "rknn_super_resolution.deploy.act_fusion_bench:main"
 rknn-super-resolution-build-rknn-calibration = "rknn_super_resolution.dev.build_mlvc_calibration:main"
 rknn-super-resolution-sr-preview-report = "rknn_super_resolution.dev.sr_preview_report:main"
+rknn-super-resolution-model-observatory = "rknn_super_resolution.dev.model_observatory:main"
+rknn-super-resolution-cst-oracle = "rknn_super_resolution.dev.cst_oracle:main"
+rknn-super-resolution-cst-oracle-summary = "rknn_super_resolution.dev.cst_oracle_summary:main"
+rknn-super-resolution-cst-information-oracle = "rknn_super_resolution.dev.cst_information_oracle:main"
+rknn-super-resolution-sparse-attention-bench = "rknn_super_resolution.deploy.sparse_attention_bench:main"
+rknn-super-resolution-temporal-correlation-observatory = "rknn_super_resolution.dev.temporal_correlation_observatory:main"
 
 [tool.uv]
 add-bounds = "exact"

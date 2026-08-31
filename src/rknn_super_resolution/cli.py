@@ -10,6 +10,21 @@ _COMMANDS = {
     "eval-mlvc-checkpoint": ("rknn_super_resolution.eval.mlvc_checkpoint", "main"),
     "export-onnx": ("rknn_super_resolution.deploy.onnx", "main"),
     "convert-rknn": ("rknn_super_resolution.deploy.rknn", "main"),
+    "model-observatory": ("rknn_super_resolution.dev.model_observatory", "main"),
+    "cst-oracle": ("rknn_super_resolution.dev.cst_oracle", "main"),
+    "cst-oracle-summary": ("rknn_super_resolution.dev.cst_oracle_summary", "main"),
+    "cst-information-oracle": (
+        "rknn_super_resolution.dev.cst_information_oracle",
+        "main",
+    ),
+    "sparse-attention-bench": (
+        "rknn_super_resolution.deploy.sparse_attention_bench",
+        "main",
+    ),
+    "temporal-correlation-observatory": (
+        "rknn_super_resolution.dev.temporal_correlation_observatory",
+        "main",
+    ),
 }
 
 

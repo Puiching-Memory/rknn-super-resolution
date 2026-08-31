@@ -19,6 +19,7 @@ from rknn_super_resolution.utils.swanlab_logging import (
     collect_sr_validation_panels,
     find_swanlab_run_id,
     load_swanlab_run_record,
+    log_observation_panels,
     make_data_preview_panel,
     make_sr_panel,
     resolve_swanlab_run_id,
@@ -149,6 +150,25 @@ def test_save_sr_panels_writes_png(tmp_path: Path):
     path = out / "sample_000.png"
     assert path.is_file()
     assert path.stat().st_size > 0
+
+
+def test_log_observation_panels_uses_active_swanlab_run(monkeypatch):
+    logged: dict[str, object] = {}
+    monkeypatch.setattr("rknn_super_resolution.utils.swanlab_logging._active", True)
+    monkeypatch.setattr(
+        "rknn_super_resolution.utils.swanlab_logging.swanlab.Image",
+        lambda panel, **kwargs: (panel.shape, kwargs),
+    )
+    monkeypatch.setattr(
+        "rknn_super_resolution.utils.swanlab_logging.swanlab.log",
+        lambda payload, **kwargs: logged.update(payload=payload, kwargs=kwargs),
+    )
+    log_observation_panels(
+        {"activations": np.zeros((8, 12, 3), dtype=np.uint8)},
+        step=7,
+    )
+    assert logged["kwargs"] == {"step": 7}
+    assert "model_observatory/activations" in logged["payload"]
 
 
 def test_find_swanlab_run_id_prefers_earliest_matching_experiment(tmp_path: Path):
